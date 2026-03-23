@@ -83,6 +83,14 @@ function createCardWithEntity(hass, entityId) {
   return card;
 }
 
+function createCardWithConfig(hass, config) {
+  const card = document.createElement("dyson-remote-card");
+  card.setConfig(config);
+  card.hass = hass;
+  document.body.appendChild(card);
+  return card;
+}
+
 describe("dyson-remote-card integration harness", () => {
   test("stepper layout is vertical (+, readout, -)", () => {
     const card = createCard(createMockHass());
@@ -359,5 +367,22 @@ describe("dyson-remote-card integration harness", () => {
     const directionCall = hass.__calls.find((c) => c.domain === "fan" && c.service === "set_direction");
     expect(directionCall).toBeTruthy();
     expect(directionCall.data.direction).toBe("reverse");
+  });
+
+  test("title renders above temperature from config", () => {
+    const hass = createMockHass();
+    const card = createCardWithConfig(hass, { entity: FAN_ENTITY_ID, title: "Living Room" });
+    const titleEl = card.shadowRoot.querySelector('[data-part="title"]');
+    expect(titleEl.hidden).toBe(false);
+    expect(titleEl.textContent).toBe("Living Room");
+  });
+
+  test("title remains hidden when config title is blank or whitespace", () => {
+    const hass = createMockHass();
+    hass.states[FAN_ENTITY_ID].attributes.friendly_name = "Bedroom Dyson";
+    const card = createCardWithConfig(hass, { entity: FAN_ENTITY_ID, title: "   " });
+    const titleEl = card.shadowRoot.querySelector('[data-part="title"]');
+    expect(titleEl.hidden).toBe(true);
+    expect(titleEl.textContent).toBe("");
   });
 });

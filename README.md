@@ -41,10 +41,13 @@ Optional settings:
 ```yaml
 type: custom:dyson-remote-card
 entity: fan.your_dyson_entity
+title: Living Room
 show_temperature_header: false
 mushroom_shell: true
 oscillation_presets: [0, 45, 90, 180, 350]
 ```
+
+`title` is optional. If omitted or blank, the title row is hidden (no fallback title is shown).
 
 ### Dashboard sizing (Sections view)
 

@@ -238,7 +238,7 @@ function isAirflowControlEngaged(st, attrs) {
   return false;
 }
 
-const DYSON_REMOTE_BUILD = "2026.03.23.1";
+const DYSON_REMOTE_BUILD = "2026.03.23.7";
 
 function entityState(hass, entityId) {
   return hass?.states?.[entityId] || null;
@@ -431,6 +431,7 @@ class DysonRemoteCard extends HTMLElement {
       show_temperature_header: config.show_temperature_header !== false,
       mushroom_shell: config.mushroom_shell !== false,
       oscillation_presets: normalizeOscillationPresets(config.oscillation_presets),
+      title: typeof config.title === "string" ? config.title : "",
     };
     this._renderStatic();
     this._updateDynamic();
@@ -566,7 +567,6 @@ class DysonRemoteCard extends HTMLElement {
         --drc-pill-r: 38px;
         --drc-label-size: 11px;
         --drc-temp-size: 17px;
-        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
         -webkit-tap-highlight-color: transparent;
       }
       .shell {
@@ -591,16 +591,26 @@ class DysonRemoteCard extends HTMLElement {
         background: var(--drc-bg);
         border-radius: inherit;
         color: var(--drc-text);
-        padding: 12px 14px 16px;
+        padding: 14px 14px 16px;
         box-sizing: border-box;
       }
+      .title {
+        display: block;
+        font-size: 1.25rem;
+        line-height: 1.3;
+        letter-spacing: 0;
+        font-weight: 500;
+        color: var(--primary-text-color, var(--drc-text));
+        margin: 0 0 6px;
+      }
+      .title[hidden] { display: none !important; }
       .header {
         display: flex;
         align-items: center;
         justify-content: center;
         gap: 8px;
         min-height: 28px;
-        margin-bottom: 10px;
+        margin-bottom: 12px;
         font-size: var(--drc-temp-size);
         font-weight: 600;
         letter-spacing: 0.2px;
@@ -841,6 +851,10 @@ class DysonRemoteCard extends HTMLElement {
         .inner-remote {
           padding: 10px 10px 14px;
         }
+        .title {
+          font-size: 1.125rem;
+          margin: 0 0 5px;
+        }
         .label {
           max-width: 96px;
         }
@@ -874,6 +888,7 @@ class DysonRemoteCard extends HTMLElement {
     const inner = document.createElement("div");
     inner.className = "inner-remote";
     inner.innerHTML = `
+      <div class="title" data-part="title"></div>
       <div class="header" part="header">
         <span class="temp-muted" data-part="temp"></span>
       </div>
@@ -953,6 +968,13 @@ class DysonRemoteCard extends HTMLElement {
     this.shadowRoot.appendChild(shell);
     this._rootEl = inner;
 
+    const titleEl = this._rootEl.querySelector('[data-part="title"]');
+    if (titleEl) {
+      const initialTitle = typeof this._config.title === "string" ? this._config.title.trim() : "";
+      titleEl.textContent = initialTitle;
+      titleEl.hidden = !initialTitle;
+    }
+
     inner.querySelectorAll("[data-ha-icon]").forEach((slot) => {
       const icon = slot.getAttribute("data-ha-icon");
       const size = Number(slot.getAttribute("data-ha-size") || 28);
@@ -1029,6 +1051,13 @@ class DysonRemoteCard extends HTMLElement {
       const txt = formatTargetTemperature(thermalAttrs, thermalAttrs.temperature_unit);
       tempEl.textContent = txt || "";
       tempEl.parentElement.hidden = !txt;
+    }
+
+    const titleEl = this._rootEl.querySelector('[data-part="title"]');
+    if (titleEl) {
+      const title = typeof this._config.title === "string" ? this._config.title.trim() : "";
+      titleEl.textContent = title;
+      titleEl.hidden = !title;
     }
 
     const autoWord = this._rootEl.querySelector('[data-part="auto-word"]');
@@ -1339,6 +1368,7 @@ class DysonRemoteCardEditor extends HTMLElement {
   setConfig(config) {
     this._config = {
       entity: "",
+      title: "",
       show_temperature_header: true,
       mushroom_shell: true,
       oscillation_presets: [0, 45, 90, 180, 350],
@@ -1349,13 +1379,22 @@ class DysonRemoteCardEditor extends HTMLElement {
 
   set hass(hass) {
     this._hass = hass;
-    this._render();
+    if (!this._config || !this.shadowRoot) {
+      this._render();
+      return;
+    }
+    const form = this.shadowRoot.getElementById("form");
+    if (form) form.hass = hass;
   }
 
   _emitConfig(config) {
+    const normalized = { ...(config || {}) };
+    const trimmedTitle = typeof normalized.title === "string" ? normalized.title.trim() : "";
+    if (trimmedTitle) normalized.title = trimmedTitle;
+    else delete normalized.title;
     this.dispatchEvent(
       new CustomEvent("config-changed", {
-        detail: { config },
+        detail: { config: normalized },
         bubbles: true,
         composed: true,
       }),
@@ -1390,6 +1429,17 @@ class DysonRemoteCardEditor extends HTMLElement {
       <style>
         :host { display:block; padding: 8px 0; }
         .wrap { display:grid; gap: 10px; }
+        .field { display:grid; gap: 6px; }
+        .field label { font-size: 13px; color: var(--secondary-text-color); }
+        .field input[type="text"] {
+          width: 100%;
+          box-sizing: border-box;
+          padding: 8px 10px;
+          border-radius: 8px;
+          border: 1px solid var(--divider-color);
+          background: var(--card-background-color);
+          color: var(--primary-text-color);
+        }
         .fallback { display:grid; gap: 8px; }
         .fallback label { font-size: 13px; color: var(--secondary-text-color); }
         .fallback input[type="text"] {
@@ -1408,15 +1458,32 @@ class DysonRemoteCardEditor extends HTMLElement {
         }
       </style>
       <div class="wrap">
+        <div class="field">
+          <label for="titleInput">Title (optional)</label>
+          <input id="titleInput" type="text" placeholder="Living Room" />
+        </div>
         ${hasForm ? `<${formTag} id="form"></${formTag}>` : `
           <div class="fallback">
             <label>Entity (fan.* or climate.*)</label>
-            <input id="entityInput" type="text" value="${this._config.entity || ""}" placeholder="fan.dyson_... or climate.dyson_..." />
+            <input id="entityInput" type="text" placeholder="fan.dyson_... or climate.dyson_..." />
+            <label>
+              <input id="showTemperatureHeaderInput" type="checkbox" />
+              Show temperature header
+            </label>
+            <label>
+              <input id="mushroomShellInput" type="checkbox" />
+              Use mushroom-style shell
+            </label>
             <div class="hint">Waiting for Home Assistant form components...</div>
           </div>
         `}
       </div>
     `;
+
+    const titleInput = this.shadowRoot.getElementById("titleInput");
+    titleInput.value = this._config.title || "";
+    const emitWithTitle = (next) => this._emitConfig({ ...next, title: titleInput.value });
+    titleInput.addEventListener("change", () => emitWithTitle(this._config));
 
     if (hasForm) {
       const form = this.shadowRoot.getElementById("form");
@@ -1430,13 +1497,26 @@ class DysonRemoteCardEditor extends HTMLElement {
         return schema.name;
       };
       form.addEventListener("value-changed", (ev) => {
-        this._emitConfig({ ...this._config, ...(ev.detail?.value || {}) });
+        emitWithTitle({ ...this._config, ...(ev.detail?.value || {}) });
       });
     } else {
       const entityInput = this.shadowRoot.getElementById("entityInput");
-      entityInput.addEventListener("change", () => {
-        this._emitConfig({ ...this._config, entity: entityInput.value.trim() });
-      });
+      const showTemperatureHeaderInput = this.shadowRoot.getElementById("showTemperatureHeaderInput");
+      const mushroomShellInput = this.shadowRoot.getElementById("mushroomShellInput");
+      entityInput.value = this._config.entity || "";
+      showTemperatureHeaderInput.checked = Boolean(this._config.show_temperature_header);
+      mushroomShellInput.checked = Boolean(this._config.mushroom_shell);
+      const emit = () => {
+        emitWithTitle({
+          ...this._config,
+          entity: entityInput.value.trim(),
+          show_temperature_header: Boolean(showTemperatureHeaderInput.checked),
+          mushroom_shell: Boolean(mushroomShellInput.checked),
+        });
+      };
+      entityInput.addEventListener("change", emit);
+      showTemperatureHeaderInput.addEventListener("change", emit);
+      mushroomShellInput.addEventListener("change", emit);
     }
   }
 }
