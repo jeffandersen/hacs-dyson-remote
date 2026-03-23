@@ -1,3 +1,4 @@
+import { computeAirQualitySummary } from "./air-quality-logic.js";
 import {
   adjustFanPercentage,
   adjustTargetTemperature,
@@ -24,7 +25,77 @@ import {
   temperatureStepAndBounds,
 } from "./dyson-logic.js";
 
-const DYSON_REMOTE_BUILD = "2026.03.23.15";
+const DYSON_REMOTE_BUILD = "2026.03.23.24";
+
+/** Pairs: editor/form use show_*; YAML may drop false, so we persist off state as hide_*: true. */
+const AIR_SUBSECTION_FLAG_PAIRS = [
+  ["show_air_quality_category", "hide_air_quality_category"],
+  ["show_air_quality_pollutant", "hide_air_quality_pollutant"],
+  ["show_air_quality_bar", "hide_air_quality_bar"],
+];
+
+function airSubsectionEnabled(config, showKey, hideKey) {
+  if (config[hideKey] === true) return false;
+  if (config[hideKey] === false) return true;
+  if (config[showKey] === false) return false;
+  return true;
+}
+
+/** ha-form may omit false keys or pass non-boolean toggles; normalize to true/false/undefined. */
+function coerceAirSubsectionShow(val) {
+  if (val === true || val === "true" || val === 1) return true;
+  if (val === false || val === "false" || val === 0) return false;
+  return undefined;
+}
+
+function airSubsectionFormValues(config) {
+  return {
+    show_air_quality_category: airSubsectionEnabled(
+      config,
+      "show_air_quality_category",
+      "hide_air_quality_category",
+    ),
+    show_air_quality_pollutant: airSubsectionEnabled(
+      config,
+      "show_air_quality_pollutant",
+      "hide_air_quality_pollutant",
+    ),
+    show_air_quality_bar: airSubsectionEnabled(config, "show_air_quality_bar", "hide_air_quality_bar"),
+  };
+}
+
+/**
+ * Lovelace often strips `false` booleans from saved YAML, so subsection "off" is stored as hide_*: true.
+ */
+function persistAirSubsectionKeys(config) {
+  const out = { ...config };
+  for (const [showKey, hideKey] of AIR_SUBSECTION_FLAG_PAIRS) {
+    const v = coerceAirSubsectionShow(out[showKey]);
+    const on = v !== false;
+    if (!on) {
+      out[hideKey] = true;
+    } else {
+      /* Explicit false so Lovelace shallow-merges clear a previous hide_*: true in the preview. */
+      out[hideKey] = false;
+    }
+    delete out[showKey];
+  }
+  return out;
+}
+
+/** Merge editor form state; prefer live `form.data` over `detail.value` so false booleans are not dropped. */
+function mergeConfigWithFormAirSubsections(prevConfig, formValue) {
+  const merged = { ...prevConfig, ...(formValue || {}) };
+  for (const [showKey, hideKey] of AIR_SUBSECTION_FLAG_PAIRS) {
+    if (formValue && showKey in formValue) {
+      const c = coerceAirSubsectionShow(formValue[showKey]);
+      merged[showKey] = c !== undefined ? c : Boolean(formValue[showKey]);
+    } else {
+      merged[showKey] = airSubsectionEnabled(merged, showKey, hideKey);
+    }
+  }
+  return merged;
+}
 
 function entityState(hass, entityId) {
   return hass?.states?.[entityId] || null;
@@ -235,6 +306,7 @@ function mountHaIcon(slot, icon, sizePx) {
   hi.icon = icon;
   hi.style.width = `${sizePx}px`;
   hi.style.height = `${sizePx}px`;
+  hi.style.color = "inherit";
   slot.appendChild(hi);
 }
 
@@ -264,6 +336,18 @@ class DysonRemoteCard extends HTMLElement {
     this._config = {
       ...config,
       show_temperature_header: config.show_temperature_header !== false,
+      show_air_quality_header: config.show_air_quality_header === true,
+      show_air_quality_category: airSubsectionEnabled(
+        config,
+        "show_air_quality_category",
+        "hide_air_quality_category",
+      ),
+      show_air_quality_pollutant: airSubsectionEnabled(
+        config,
+        "show_air_quality_pollutant",
+        "hide_air_quality_pollutant",
+      ),
+      show_air_quality_bar: airSubsectionEnabled(config, "show_air_quality_bar", "hide_air_quality_bar"),
       mushroom_shell: config.mushroom_shell !== false,
       oscillation_presets: normalizeOscillationPresets(config.oscillation_presets),
       title: typeof config.title === "string" ? config.title : "",
@@ -476,6 +560,131 @@ class DysonRemoteCard extends HTMLElement {
       .header .temp-muted {
         opacity: 0.85;
         font-weight: 500;
+      }
+      .aq-header {
+        text-align: center;
+        margin-bottom: 18px;
+        --aq-accent: #34d399;
+        padding: 14px 16px 12px;
+        border-radius: 16px;
+        box-sizing: border-box;
+        /* Avoid CSS keyword transparent in gradients: it is rgba(0,0,0,0) and
+           interpolates through a dark band between stops. */
+        background: linear-gradient(
+          180deg,
+          color-mix(in srgb, var(--aq-accent) 28%, rgba(255, 255, 255, 0)) 0%,
+          color-mix(in srgb, var(--aq-accent) 9%, rgba(255, 255, 255, 0)) 52%,
+          rgba(255, 255, 255, 0) 100%
+        );
+      }
+      .aq-header[hidden] {
+        display: none !important;
+      }
+      .aq-title-row {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 10px;
+        position: relative;
+        margin-bottom: 8px;
+        min-height: 36px;
+      }
+      .aq-title-row[hidden] {
+        display: none !important;
+      }
+      .aq-title {
+        position: relative;
+        font-size: clamp(1.35rem, 4.5cqi, 1.7rem);
+        font-weight: 700;
+        letter-spacing: 0.02em;
+        color: var(--aq-accent);
+      }
+      .aq-title-icon {
+        position: relative;
+        color: var(--aq-accent);
+      }
+      .aq-title-icon ha-icon {
+        color: var(--aq-accent) !important;
+        --icon-primary-color: var(--aq-accent);
+      }
+      .aq-subtitle {
+        font-size: 13px;
+        font-weight: 500;
+        margin-bottom: 12px;
+        line-height: 1.4;
+      }
+      .aq-subtitle[hidden] {
+        display: none !important;
+      }
+      .aq-sub-bullet {
+        color: var(--aq-accent);
+        margin-right: 5px;
+        font-weight: 700;
+      }
+      .aq-sub-bullet[hidden] {
+        display: none !important;
+      }
+      .aq-sub-text {
+        color: var(--drc-muted);
+      }
+      .aq-header.aq--accent-subtitle .aq-sub-text {
+        color: color-mix(in srgb, var(--aq-accent) 78%, #a8a8ad);
+      }
+      .aq-bar-track {
+        position: relative;
+        height: 14px;
+        margin: 0 auto 8px;
+        max-width: 92%;
+      }
+      .aq-bar-track[hidden] {
+        display: none !important;
+      }
+      .aq-bar-segments {
+        display: flex;
+        gap: 3px;
+        height: 10px;
+        border-radius: 999px;
+        overflow: hidden;
+        background: rgba(0, 0, 0, 0.28);
+        align-items: stretch;
+        position: relative;
+        z-index: 1;
+      }
+      .aq-seg {
+        flex: 1 1 0;
+        min-width: 0;
+        transition: opacity 0.2s ease, box-shadow 0.2s ease;
+        border-radius: 0;
+      }
+      .aq-seg:first-child {
+        border-radius: 999px 0 0 999px;
+      }
+      .aq-seg:last-child {
+        border-radius: 0 999px 999px 0;
+      }
+      .aq-seg.is-dim {
+        opacity: 0.4;
+      }
+      .aq-seg.is-active {
+        opacity: 1;
+        box-shadow: 0 0 8px color-mix(in srgb, var(--aq-accent) 55%, transparent);
+      }
+      .aq-thumb {
+        position: absolute;
+        width: 14px;
+        height: 14px;
+        top: 50%;
+        left: 10%;
+        transform: translate(-50%, -50%);
+        border-radius: 50%;
+        background: rgba(255, 255, 255, 0.96);
+        border: 2px solid var(--aq-accent);
+        box-shadow:
+          0 0 6px color-mix(in srgb, var(--aq-accent) 70%, transparent),
+          0 0 12px color-mix(in srgb, var(--aq-accent) 40%, transparent);
+        z-index: 2;
+        pointer-events: none;
+        transition: left 0.25s ease, border-color 0.2s ease, box-shadow 0.2s ease;
       }
       .grid {
         display: grid;
@@ -745,6 +954,25 @@ class DysonRemoteCard extends HTMLElement {
     inner.className = "inner-remote";
     inner.innerHTML = `
       <div class="title" data-part="title"></div>
+      <div class="aq-header" data-part="aq-header" hidden>
+        <div class="aq-title-row" data-part="aq-title-row">
+          <span class="aq-title" data-part="aq-title">—</span>
+          <span class="icon-slot aq-title-icon" data-part="aq-icon-slot" data-ha-icon="mdi:check-circle-outline" data-ha-size="26"></span>
+        </div>
+        <div class="aq-subtitle" data-part="aq-subtitle-wrap">
+          <span class="aq-sub-bullet" data-part="aq-bullet">•</span><span class="aq-sub-text" data-part="aq-subtext"></span>
+        </div>
+        <div class="aq-bar-track" data-part="aq-bar-track">
+          <div class="aq-bar-segments" data-part="aq-segments">
+            <div class="aq-seg" data-aq-seg="0"></div>
+            <div class="aq-seg" data-aq-seg="1"></div>
+            <div class="aq-seg" data-aq-seg="2"></div>
+            <div class="aq-seg" data-aq-seg="3"></div>
+            <div class="aq-seg" data-aq-seg="4"></div>
+          </div>
+          <div class="aq-thumb" data-part="aq-thumb"></div>
+        </div>
+      </div>
       <div class="header" part="header">
         <span class="temp-muted" data-part="temp"></span>
       </div>
@@ -1016,6 +1244,66 @@ class DysonRemoteCard extends HTMLElement {
       const txt = formatTargetTemperature(thermalAttrs, thermalAttrs.temperature_unit);
       tempEl.textContent = txt || "";
       tempEl.parentElement.hidden = !txt;
+    }
+
+    const aqHeader = this._rootEl.querySelector('[data-part="aq-header"]');
+    if (aqHeader) {
+      if (!this._config.show_air_quality_header) {
+        aqHeader.hidden = true;
+      } else {
+        const oid = fanEntityObjectId(fanEntityId || this._config.entity);
+        const aq = computeAirQualitySummary(this._hass, oid, realFanAttrs);
+        if (!aq) {
+          aqHeader.hidden = true;
+        } else {
+          const showCat = this._config.show_air_quality_category !== false;
+          const showPoll = this._config.show_air_quality_pollutant !== false;
+          const showBar = this._config.show_air_quality_bar !== false;
+          const showAnyPart = showCat || showPoll || showBar;
+
+          if (!showAnyPart) {
+            aqHeader.hidden = true;
+          } else {
+            aqHeader.hidden = false;
+            aqHeader.style.setProperty("--aq-accent", aq.accentHex);
+            aqHeader.classList.toggle("aq--accent-subtitle", showPoll && !aq.subtitle.bullet);
+
+            const titleRow = this._rootEl.querySelector('[data-part="aq-title-row"]');
+            if (titleRow) titleRow.hidden = !showCat;
+
+            const aqTitle = this._rootEl.querySelector('[data-part="aq-title"]');
+            if (aqTitle) aqTitle.textContent = aq.title;
+
+            const iconSlot = this._rootEl.querySelector('[data-part="aq-icon-slot"]');
+            if (iconSlot) mountHaIcon(iconSlot, aq.icon, 26);
+
+            const subWrap = this._rootEl.querySelector('[data-part="aq-subtitle-wrap"]');
+            if (subWrap) subWrap.hidden = !showPoll;
+
+            const bulletEl = this._rootEl.querySelector('[data-part="aq-bullet"]');
+            const subEl = this._rootEl.querySelector('[data-part="aq-subtext"]');
+            if (bulletEl) bulletEl.hidden = !aq.subtitle.bullet;
+            if (subEl) subEl.textContent = aq.subtitle.text;
+
+            const barTrack = this._rootEl.querySelector('[data-part="aq-bar-track"]');
+            if (barTrack) barTrack.hidden = !showBar;
+
+            const segs = this._rootEl.querySelectorAll("[data-aq-seg]");
+            segs.forEach((el) => {
+              const i = Number(el.getAttribute("data-aq-seg"));
+              el.style.backgroundColor = aq.segmentHex[i] || "#555";
+              el.classList.toggle("is-active", i === aq.levelIndex);
+              el.classList.toggle("is-dim", i !== aq.levelIndex);
+            });
+
+            const thumb = this._rootEl.querySelector('[data-part="aq-thumb"]');
+            if (thumb) {
+              const pct = ((aq.levelIndex + 0.5) / 5) * 100;
+              thumb.style.left = `${pct}%`;
+            }
+          }
+        }
+      }
     }
 
     const titleEl = this._rootEl.querySelector('[data-part="title"]');
@@ -1352,7 +1640,16 @@ window.customCards.push({
 });
 
 class DysonRemoteCardEditor extends HTMLElement {
-  static get _schema() {
+  static _schemaFor(data) {
+    const d = data || {};
+    const aqHeaderOn = d.show_air_quality_header === true;
+    const sub = aqHeaderOn
+      ? [
+          { name: "show_air_quality_category", selector: { boolean: {} } },
+          { name: "show_air_quality_pollutant", selector: { boolean: {} } },
+          { name: "show_air_quality_bar", selector: { boolean: {} } },
+        ]
+      : [];
     return [
       {
         name: "entity",
@@ -1375,6 +1672,11 @@ class DysonRemoteCardEditor extends HTMLElement {
         selector: { boolean: {} },
       },
       {
+        name: "show_air_quality_header",
+        selector: { boolean: {} },
+      },
+      ...sub,
+      {
         name: "mushroom_shell",
         selector: { boolean: {} },
       },
@@ -1387,6 +1689,7 @@ class DysonRemoteCardEditor extends HTMLElement {
       title: "",
       oscillation_select_entity: "",
       show_temperature_header: true,
+      show_air_quality_header: false,
       mushroom_shell: true,
       oscillation_presets: [0, 45, 90, 180, 350],
       ...config,
@@ -1405,7 +1708,7 @@ class DysonRemoteCardEditor extends HTMLElement {
   }
 
   _emitConfig(config) {
-    const normalized = { ...(config || {}) };
+    const normalized = persistAirSubsectionKeys({ ...(config || {}) });
     const trimmedTitle = typeof normalized.title === "string" ? normalized.title.trim() : "";
     if (trimmedTitle) normalized.title = trimmedTitle;
     else delete normalized.title;
@@ -1413,6 +1716,7 @@ class DysonRemoteCardEditor extends HTMLElement {
       typeof normalized.oscillation_select_entity === "string" ? normalized.oscillation_select_entity.trim() : "";
     if (trimmedOscSel) normalized.oscillation_select_entity = trimmedOscSel;
     else delete normalized.oscillation_select_entity;
+    this._config = { ...normalized };
     this.dispatchEvent(
       new CustomEvent("config-changed", {
         detail: { config: normalized },
@@ -1477,10 +1781,13 @@ class DysonRemoteCardEditor extends HTMLElement {
           color: var(--secondary-text-color);
           opacity: 0.8;
         }
+        .aq-sub-opts[hidden] {
+          display: none !important;
+        }
       </style>
       <div class="wrap">
         <div class="field">
-          <label for="titleInput">Title (optional)</label>
+          <label for="titleInput">Title</label>
           <input id="titleInput" type="text" placeholder="Living Room" />
         </div>
         ${hasForm ? `<${formTag} id="form"></${formTag}>` : `
@@ -1491,6 +1798,24 @@ class DysonRemoteCardEditor extends HTMLElement {
               <input id="showTemperatureHeaderInput" type="checkbox" />
               Show temperature header
             </label>
+            <label>
+              <input id="showAirQualityHeaderInput" type="checkbox" />
+              Show air quality header
+            </label>
+            <div class="aq-sub-opts" data-part="aq-sub-opts">
+              <label>
+                <input id="showAirQualityCategoryInput" type="checkbox" />
+                Show category
+              </label>
+              <label>
+                <input id="showAirQualityPollutantInput" type="checkbox" />
+                Show pollutant
+              </label>
+              <label>
+                <input id="showAirQualityBarInput" type="checkbox" />
+                Show air quality bar
+              </label>
+            </div>
             <label>
               <input id="mushroomShellInput" type="checkbox" />
               Use mushroom-style shell
@@ -1509,35 +1834,80 @@ class DysonRemoteCardEditor extends HTMLElement {
     if (hasForm) {
       const form = this.shadowRoot.getElementById("form");
       form.hass = this._hass;
-      form.data = this._config;
-      form.schema = DysonRemoteCardEditor._schema;
+      form.data = {
+        entity: this._config.entity || "",
+        oscillation_select_entity: this._config.oscillation_select_entity || "",
+        show_temperature_header: this._config.show_temperature_header !== false,
+        show_air_quality_header: this._config.show_air_quality_header === true,
+        ...airSubsectionFormValues(this._config),
+        mushroom_shell: this._config.mushroom_shell !== false,
+      };
+      form.schema = DysonRemoteCardEditor._schemaFor(form.data);
       form.computeLabel = (schema) => {
         if (schema.name === "entity") return "Entity";
-        if (schema.name === "oscillation_select_entity") return "Oscillation select (optional)";
+        if (schema.name === "oscillation_select_entity") return "Oscillation select";
         if (schema.name === "show_temperature_header") return "Show temperature header";
+        if (schema.name === "show_air_quality_header") return "Show air quality header";
+        if (schema.name === "show_air_quality_category") return "Show category";
+        if (schema.name === "show_air_quality_pollutant") return "Show pollutant";
+        if (schema.name === "show_air_quality_bar") return "Show air quality bar";
         if (schema.name === "mushroom_shell") return "Use mushroom-style shell";
         return schema.name;
       };
+      form.computeHelper = (schema) => {
+        if (schema.name === "oscillation_select_entity") {
+          return "Optional.";
+        }
+        return undefined;
+      };
       form.addEventListener("value-changed", (ev) => {
-        emitWithTitle({ ...this._config, ...(ev.detail?.value || {}) });
+        const raw = form.data != null ? form.data : ev.detail?.value;
+        const merged = mergeConfigWithFormAirSubsections(this._config, raw);
+        form.schema = DysonRemoteCardEditor._schemaFor(merged);
+        emitWithTitle(merged);
       });
     } else {
       const entityInput = this.shadowRoot.getElementById("entityInput");
       const showTemperatureHeaderInput = this.shadowRoot.getElementById("showTemperatureHeaderInput");
+      const showAirQualityHeaderInput = this.shadowRoot.getElementById("showAirQualityHeaderInput");
+      const showAirQualityCategoryInput = this.shadowRoot.getElementById("showAirQualityCategoryInput");
+      const showAirQualityPollutantInput = this.shadowRoot.getElementById("showAirQualityPollutantInput");
+      const showAirQualityBarInput = this.shadowRoot.getElementById("showAirQualityBarInput");
       const mushroomShellInput = this.shadowRoot.getElementById("mushroomShellInput");
+      const aqSubOpts = this.shadowRoot.querySelector('[data-part="aq-sub-opts"]');
       entityInput.value = this._config.entity || "";
       showTemperatureHeaderInput.checked = Boolean(this._config.show_temperature_header);
+      showAirQualityHeaderInput.checked = Boolean(this._config.show_air_quality_header);
+      const subVals = airSubsectionFormValues(this._config);
+      showAirQualityCategoryInput.checked = subVals.show_air_quality_category;
+      showAirQualityPollutantInput.checked = subVals.show_air_quality_pollutant;
+      showAirQualityBarInput.checked = subVals.show_air_quality_bar;
       mushroomShellInput.checked = Boolean(this._config.mushroom_shell);
+      const syncAqSubVisibility = () => {
+        if (aqSubOpts) aqSubOpts.hidden = !showAirQualityHeaderInput.checked;
+      };
+      syncAqSubVisibility();
       const emit = () => {
         emitWithTitle({
           ...this._config,
           entity: entityInput.value.trim(),
           show_temperature_header: Boolean(showTemperatureHeaderInput.checked),
+          show_air_quality_header: Boolean(showAirQualityHeaderInput.checked),
+          show_air_quality_category: Boolean(showAirQualityCategoryInput.checked),
+          show_air_quality_pollutant: Boolean(showAirQualityPollutantInput.checked),
+          show_air_quality_bar: Boolean(showAirQualityBarInput.checked),
           mushroom_shell: Boolean(mushroomShellInput.checked),
         });
       };
       entityInput.addEventListener("change", emit);
       showTemperatureHeaderInput.addEventListener("change", emit);
+      showAirQualityHeaderInput.addEventListener("change", () => {
+        syncAqSubVisibility();
+        emit();
+      });
+      showAirQualityCategoryInput.addEventListener("change", emit);
+      showAirQualityPollutantInput.addEventListener("change", emit);
+      showAirQualityBarInput.addEventListener("change", emit);
       mushroomShellInput.addEventListener("change", emit);
     }
   }

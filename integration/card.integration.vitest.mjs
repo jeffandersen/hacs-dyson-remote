@@ -447,6 +447,88 @@ describe("dyson-remote-card integration harness", () => {
     expect(directionCall.data.direction).toBe("reverse");
   });
 
+  test("air quality hide_* keys turn off subsections", () => {
+    const hass = createMockHass();
+    hass.states["sensor.dyson_device_pm25"] = {
+      state: "14",
+      attributes: { friendly_name: "PM 2.5", device_class: "pm25" },
+    };
+    const card = createCardWithConfig(hass, {
+      entity: FAN_ENTITY_ID,
+      show_air_quality_header: true,
+      hide_air_quality_category: true,
+    });
+    expect(card.shadowRoot.querySelector('[data-part="aq-header"]').hidden).toBe(false);
+    expect(card.shadowRoot.querySelector('[data-part="aq-title-row"]').hidden).toBe(true);
+    const css = [...card.shadowRoot.querySelectorAll("style")].map((s) => s.textContent).join("\n");
+    expect(css).toContain(".aq-title-row[hidden]");
+  });
+
+  test("air quality header shows when enabled and matching sensors exist", () => {
+    const hass = createMockHass();
+    hass.states["sensor.dyson_device_pm25"] = {
+      state: "14",
+      attributes: { friendly_name: "PM 2.5", device_class: "pm25" },
+    };
+    const card = createCardWithConfig(hass, {
+      entity: FAN_ENTITY_ID,
+      show_air_quality_header: true,
+    });
+    const aq = card.shadowRoot.querySelector('[data-part="aq-header"]');
+    expect(aq.hidden).toBe(false);
+    const title = card.shadowRoot.querySelector('[data-part="aq-title"]');
+    expect(title.textContent).toBe("Fair");
+  });
+
+  test("air quality header gradient avoids black-band transparent keyword", () => {
+    const hass = createMockHass();
+    hass.states["sensor.dyson_device_pm25"] = {
+      state: "14",
+      attributes: { friendly_name: "PM 2.5", device_class: "pm25" },
+    };
+    const card = createCardWithConfig(hass, {
+      entity: FAN_ENTITY_ID,
+      show_air_quality_header: true,
+    });
+    const css = [...card.shadowRoot.querySelectorAll("style")]
+      .map((s) => s.textContent)
+      .join("\n");
+    expect(css).toContain(".aq-header");
+    expect(css).toContain("rgba(255, 255, 255, 0) 100%");
+  });
+
+  test("air quality header can hide color bar only", () => {
+    const hass = createMockHass();
+    hass.states["sensor.dyson_device_pm25"] = {
+      state: "14",
+      attributes: { friendly_name: "PM 2.5", device_class: "pm25" },
+    };
+    const card = createCardWithConfig(hass, {
+      entity: FAN_ENTITY_ID,
+      show_air_quality_header: true,
+      show_air_quality_bar: false,
+    });
+    expect(card.shadowRoot.querySelector('[data-part="aq-header"]').hidden).toBe(false);
+    expect(card.shadowRoot.querySelector('[data-part="aq-bar-track"]').hidden).toBe(true);
+    expect(card.shadowRoot.querySelector('[data-part="aq-title-row"]').hidden).toBe(false);
+  });
+
+  test("air quality header hides when all sub-sections are off", () => {
+    const hass = createMockHass();
+    hass.states["sensor.dyson_device_pm25"] = {
+      state: "14",
+      attributes: { friendly_name: "PM 2.5", device_class: "pm25" },
+    };
+    const card = createCardWithConfig(hass, {
+      entity: FAN_ENTITY_ID,
+      show_air_quality_header: true,
+      show_air_quality_category: false,
+      show_air_quality_pollutant: false,
+      show_air_quality_bar: false,
+    });
+    expect(card.shadowRoot.querySelector('[data-part="aq-header"]').hidden).toBe(true);
+  });
+
   test("title renders above temperature from config", () => {
     const hass = createMockHass();
     const card = createCardWithConfig(hass, { entity: FAN_ENTITY_ID, title: "Living Room" });
