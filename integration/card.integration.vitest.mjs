@@ -17,6 +17,7 @@ function createMockHass(overrides = {}) {
         preset_mode: "Manual",
         percentage: 40,
         percentage_step: 10,
+        direction: "forward",
         auto_mode: false,
         heating_mode: "OFF",
         oscillation_enabled: false,
@@ -48,7 +49,7 @@ function createMockHass(overrides = {}) {
   const hass = {
     states,
     services: {
-      fan: { turn_on: {}, turn_off: {}, set_percentage: {}, set_temperature: {}, oscillate: {}, set_preset_mode: {} },
+      fan: { turn_on: {}, turn_off: {}, set_percentage: {}, set_temperature: {}, oscillate: {}, set_preset_mode: {}, set_direction: {} },
       climate: { set_hvac_mode: {}, set_temperature: {}, set_humidity: {} },
       humidifier: { turn_on: {}, turn_off: {}, set_humidity: {} },
       dyson: { set_angle: {}, set_night_mode: {} },
@@ -346,5 +347,17 @@ describe("dyson-remote-card integration harness", () => {
       (c) => c.domain === "fan" && c.service === "turn_on" && Object.hasOwn(c.data || {}, "oscillating"),
     );
     expect(invalidOscPayload).toBe(false);
+  });
+
+  test("airflow direction toggles via fan.set_direction", async () => {
+    const hass = createMockHass();
+    const card = createCard(hass);
+    const directionBtn = card.shadowRoot.querySelector('button[data-action="direction"]');
+    directionBtn.click();
+    await nextTick();
+
+    const directionCall = hass.__calls.find((c) => c.domain === "fan" && c.service === "set_direction");
+    expect(directionCall).toBeTruthy();
+    expect(directionCall.data.direction).toBe("reverse");
   });
 });

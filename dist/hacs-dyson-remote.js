@@ -238,8 +238,21 @@ function isAirflowControlEngaged(st, attrs) {
   return false;
 }
 
+const DYSON_REMOTE_BUILD = "2026.03.23.1";
+
 function entityState(hass, entityId) {
   return hass?.states?.[entityId] || null;
+}
+
+function normalizeDirection(direction) {
+  const d = typeof direction === "string" ? direction.toLowerCase() : "";
+  if (d === "reverse" || d === "backward" || d === "backwards" || d === "back") return "reverse";
+  if (d === "forward" || d === "front" || d === "fwd") return "forward";
+  return "forward";
+}
+
+function toggledDirection(direction) {
+  return normalizeDirection(direction) === "forward" ? "reverse" : "forward";
 }
 
 function relatedClimateEntityId(hass, fanEntityId) {
@@ -614,6 +627,9 @@ class DysonRemoteCard extends HTMLElement {
       .cell--span-center {
         grid-column: 2;
       }
+      .cell--span-right {
+        grid-column: 3;
+      }
       .label {
         font-size: var(--drc-label-size);
         line-height: 1.2;
@@ -845,6 +861,9 @@ class DysonRemoteCard extends HTMLElement {
         .cell--span-center {
           grid-column: 1 / -1;
         }
+        .cell--span-right {
+          grid-column: auto;
+        }
       }
     `;
 
@@ -918,6 +937,12 @@ class DysonRemoteCard extends HTMLElement {
           </button>
           <div class="label">Night mode</div>
         </div>
+        <div class="cell cell--span-right">
+          <button type="button" class="btn-circle" data-action="direction" aria-label="Airflow direction">
+            <span class="icon-slot" data-part="direction-icon" data-ha-icon="mdi:arrow-right-bold" data-ha-size="28"></span>
+          </button>
+          <div class="label">Airflow direction</div>
+        </div>
       </div>
     `;
 
@@ -963,6 +988,7 @@ class DysonRemoteCard extends HTMLElement {
       osc_plus: ['[data-stepper="oscillation"]'],
       osc_minus: ['[data-stepper="oscillation"]'],
       night: ['button[data-action="night"]'],
+      direction: ['button[data-action="direction"]'],
     };
     return byAction[action] || [];
   }
@@ -1018,6 +1044,16 @@ class DysonRemoteCard extends HTMLElement {
     const autoLabel = this._rootEl.querySelector('[data-part="auto-label"]');
     if (autoLabel) {
       autoLabel.textContent = humidifierMode ? "Auto humidify" : "Auto mode";
+    }
+
+    const directionValue = normalizeDirection(attrs.direction);
+    const directionIconSlot = this._rootEl.querySelector('[data-part="direction-icon"]');
+    if (directionIconSlot) {
+      mountHaIcon(
+        directionIconSlot,
+        directionValue === "forward" ? "mdi:arrow-right-bold" : "mdi:arrow-left-bold",
+        28,
+      );
     }
 
     const airflowMid = this._rootEl.querySelector('[data-part="airflow-mid"]');
@@ -1078,6 +1114,7 @@ class DysonRemoteCard extends HTMLElement {
     );
     this._toggleEngaged('[data-stepper="oscillation"]', attrs.oscillation_enabled === true);
     this._toggleEngaged('button[data-action="night"]', isNightModeActive(attrs));
+    this._toggleEngaged('button[data-action="direction"]', directionValue !== "forward");
   }
 
   async _onAction(action) {
@@ -1242,6 +1279,16 @@ class DysonRemoteCard extends HTMLElement {
           }
           break;
         }
+        case "direction": {
+          const next = toggledDirection(attrs.direction);
+          this._applyOptimisticPatch({ direction: next });
+          if (hass?.services?.[domain]?.set_direction) {
+            await hass.callService(domain, "set_direction", { entity_id: entityId, direction: next });
+          } else {
+            await hass.callService(domain, "turn_on", { entity_id: entityId, direction: next });
+          }
+          break;
+        }
         default:
           break;
       }
@@ -1264,7 +1311,7 @@ window.customCards = window.customCards || [];
 window.customCards.push({
   type: "dyson-remote-card",
   name: "Dyson Remote",
-  description: "Control strip styled like the Dyson mobile app",
+  description: `Control strip styled like the Dyson mobile app (build ${DYSON_REMOTE_BUILD})`,
 });
 
 class DysonRemoteCardEditor extends HTMLElement {
