@@ -21,7 +21,7 @@ import {
   temperatureStepAndBounds,
 } from "./dyson-logic.js";
 
-const DYSON_REMOTE_BUILD = "2026.03.23.7";
+const DYSON_REMOTE_BUILD = "2026.03.23.10";
 
 function entityState(hass, entityId) {
   return hass?.states?.[entityId] || null;
@@ -444,22 +444,23 @@ class DysonRemoteCard extends HTMLElement {
         outline-offset: 2px;
       }
       .icon-slot {
-        display: flex;
-        align-items: center;
-        justify-content: center;
+        display: grid;
+        place-items: center;
+        line-height: 0;
         color: var(--drc-text);
       }
       .icon-slot ha-icon {
         display: block;
+        line-height: 0;
       }
       .btn-circle {
         width: var(--drc-circle);
         height: var(--drc-circle);
         border-radius: 50%;
         background: var(--drc-surface-idle);
-        display: flex;
-        align-items: center;
-        justify-content: center;
+        display: grid;
+        place-items: center;
+        line-height: 0;
         transition: background 0.18s ease, transform 0.08s ease;
       }
       .btn-circle:active { transform: scale(0.97); }
@@ -517,11 +518,10 @@ class DysonRemoteCard extends HTMLElement {
         height: 24px;
         border-radius: 50%;
         font-size: 16px;
-        line-height: 1;
+        line-height: 0;
         font-weight: 600;
-        display: flex;
-        align-items: center;
-        justify-content: center;
+        display: grid;
+        place-items: center;
         transition: background 0.12s ease, color 0.12s ease, transform 0.08s ease;
       }
       .stepper-btn:active {
@@ -616,8 +616,7 @@ class DysonRemoteCard extends HTMLElement {
         color: rgba(255, 255, 255, 0.38);
       }
       button[data-action="night"].is-engaged .icon-slot {
-        color: #ffd60a;
-        filter: drop-shadow(0 0 8px rgba(255, 214, 10, 0.35));
+        color: #ffffff;
       }
 
       @container (max-width: 430px) {
@@ -719,7 +718,7 @@ class DysonRemoteCard extends HTMLElement {
         </div>
         <div class="cell">
           <div class="stepper-pill" data-stepper="oscillation" aria-label="Oscillation angle">
-            <span class="icon-slot" data-ha-icon="mdi:arrow-left-right" data-ha-size="26"></span>
+            <span class="icon-slot" data-ha-icon="mdi:rotate-360" data-ha-size="26"></span>
             <div class="stepper-col">
               <button type="button" class="stepper-btn" data-action="osc_plus" aria-label="Next oscillation">+</button>
               <span class="stepper-readout muted" data-part="osc-mid">OFF</span>
@@ -731,13 +730,13 @@ class DysonRemoteCard extends HTMLElement {
 
         <div class="cell cell--span-center">
           <button type="button" class="btn-circle" data-action="night" aria-label="Night mode">
-            <span class="icon-slot" data-ha-icon="mdi:moon-waning-crescent" data-ha-size="28"></span>
+            <span class="icon-slot" data-ha-icon="mdi:weather-night" data-ha-size="28"></span>
           </button>
           <div class="label">Night mode</div>
         </div>
         <div class="cell cell--span-right">
           <button type="button" class="btn-circle" data-action="direction" aria-label="Airflow direction">
-            <span class="icon-slot" data-part="direction-icon" data-ha-icon="mdi:arrow-right-bold" data-ha-size="28"></span>
+            <span class="icon-slot" data-part="direction-icon" data-ha-icon="mdi:tray-arrow-up" data-ha-size="28"></span>
           </button>
           <div class="label">Airflow direction</div>
         </div>
@@ -863,7 +862,7 @@ class DysonRemoteCard extends HTMLElement {
     if (directionIconSlot) {
       mountHaIcon(
         directionIconSlot,
-        directionValue === "forward" ? "mdi:arrow-right-bold" : "mdi:arrow-left-bold",
+        directionValue === "forward" ? "mdi:tray-arrow-up" : "mdi:tray-arrow-down",
         28,
       );
     }
