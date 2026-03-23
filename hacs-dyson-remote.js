@@ -238,7 +238,7 @@ function isAirflowControlEngaged(st, attrs) {
   return false;
 }
 
-const DYSON_REMOTE_BUILD = "2026.03.23.10";
+const DYSON_REMOTE_BUILD = "2026.03.23.11";
 
 function entityState(hass, entityId) {
   return hass?.states?.[entityId] || null;
@@ -414,6 +414,8 @@ class DysonRemoteCard extends HTMLElement {
     this._rootEl = null;
     this._pendingActions = new Set();
     this._optimisticAttrs = null;
+    this._optimisticExpected = null;
+    this._optimisticOscPresetIndex = null;
     this._optimisticClearTimer = null;
   }
 
@@ -1022,16 +1024,119 @@ class DysonRemoteCard extends HTMLElement {
     });
   }
 
-  _applyOptimisticPatch(patch) {
-    this._optimisticAttrs = { ...(this._optimisticAttrs || {}), ...(patch || {}) };
+  _clearOptimisticState() {
+    if (this._optimisticClearTimer) {
+      clearTimeout(this._optimisticClearTimer);
+      this._optimisticClearTimer = null;
+    }
+    this._optimisticAttrs = null;
+    this._optimisticExpected = null;
+    this._optimisticOscPresetIndex = null;
+  }
+
+  /**
+   * Drop optimistic overlays only when real entity state matches what we asked for,
+   * so the UI does not snap back to stale values before HA catches up.
+   */
+  _reconcileOptimisticState(st, climateEntityId, humidifierEntityId) {
+    if (!this._optimisticAttrs || !this._optimisticExpected) return;
+
+    const realFan = st?.attributes || {};
+    const climateAttrs = climateEntityId ? this._hass?.states?.[climateEntityId]?.attributes || {} : {};
+    const humidifierAttrs = humidifierEntityId ? this._hass?.states?.[humidifierEntityId]?.attributes || {} : {};
+    const thermalReal = mergedThermalAttrs(realFan, climateAttrs);
+    const humidityCombined = { ...realFan, ...climateAttrs, ...humidifierAttrs };
+
+    const nextPatch = { ...this._optimisticAttrs };
+    const nextExpected = { ...this._optimisticExpected };
+    const presets = this._config.oscillation_presets || normalizeOscillationPresets(null);
+
+    const del = (key) => {
+      delete nextPatch[key];
+      delete nextExpected[key];
+    };
+
+    if (this._optimisticOscPresetIndex != null && presets.length) {
+      const idx = inferOscillationPresetIndex(realFan, presets);
+      if (idx === this._optimisticOscPresetIndex) {
+        del("oscillation_enabled");
+        del("oscillation_span");
+        this._optimisticOscPresetIndex = null;
+      }
+    }
+
+    if (nextPatch.direction !== undefined && nextExpected.direction !== undefined) {
+      if (normalizeDirection(realFan.direction) === normalizeDirection(nextExpected.direction)) {
+        del("direction");
+      }
+    }
+
+    if (nextPatch.percentage !== undefined && nextExpected.percentage !== undefined) {
+      const r = realFan.percentage;
+      if (typeof r === "number" && Number.isFinite(r) && Math.abs(r - nextExpected.percentage) <= 1.5) {
+        del("percentage");
+      }
+    }
+
+    if (nextPatch.auto_mode !== undefined && nextExpected.auto_mode !== undefined) {
+      if (Boolean(realFan.auto_mode) === Boolean(nextExpected.auto_mode)) {
+        del("auto_mode");
+      }
+    }
+
+    if (nextPatch.target_temperature !== undefined && nextExpected.target_temperature !== undefined) {
+      const r = thermalReal.target_temperature;
+      if (typeof r === "number" && Number.isFinite(r) && Math.abs(r - nextExpected.target_temperature) <= 0.55) {
+        del("target_temperature");
+      }
+    }
+
+    const humExp = nextExpected.target_humidity ?? nextExpected.humidity;
+    const hasHumidPatch =
+      nextPatch.target_humidity !== undefined ||
+      nextPatch.humidity !== undefined ||
+      nextPatch.humidity_enabled !== undefined;
+    if (hasHumidPatch) {
+      let ok = true;
+      if (humExp != null && typeof humExp === "number" && Number.isFinite(humExp)) {
+        const r = inferTargetHumidity(humidityCombined);
+        ok = r != null && Math.round(r) === Math.round(humExp);
+      }
+      if (nextPatch.humidity_enabled !== undefined) {
+        const wantOn =
+          (typeof nextExpected.humidity_enabled === "string" && nextExpected.humidity_enabled.toUpperCase() === "ON") ||
+          nextExpected.humidity_enabled === true;
+        ok = ok && isHumidityEnabled(humidityCombined) === wantOn;
+      }
+      if (ok) {
+        del("target_humidity");
+        del("humidity");
+        del("humidity_enabled");
+      }
+    }
+
+    if (Object.keys(nextPatch).length === 0) {
+      this._clearOptimisticState();
+    } else {
+      this._optimisticAttrs = nextPatch;
+      this._optimisticExpected = nextExpected;
+    }
+  }
+
+  _applyOptimisticPatch(patch, meta = {}) {
+    if (!patch || typeof patch !== "object") return;
+    this._optimisticAttrs = { ...(this._optimisticAttrs || {}), ...patch };
+    this._optimisticExpected = { ...(this._optimisticExpected || {}), ...patch };
+    if (meta.oscPresetIndex != null) {
+      this._optimisticOscPresetIndex = meta.oscPresetIndex;
+    }
     if (this._optimisticClearTimer) {
       clearTimeout(this._optimisticClearTimer);
     }
     this._optimisticClearTimer = setTimeout(() => {
-      this._optimisticAttrs = null;
-      this._optimisticClearTimer = null;
+      this._clearOptimisticState();
       this._updateDynamic();
-    }, 1500);
+    }, 12000);
     this._updateDynamic();
   }
 
@@ -1039,6 +1144,7 @@ class DysonRemoteCard extends HTMLElement {
     if (!this._rootEl || !this._hass) return;
     const { fanEntityId, climateEntityId, humidifierEntityId } = resolveEntityPair(this._hass, this._config.entity);
     const st = fanEntityId ? entityState(this._hass, fanEntityId) : entityState(this._hass, this._config.entity);
+    this._reconcileOptimisticState(st, climateEntityId, humidifierEntityId);
     const attrs = { ...(st?.attributes || {}), ...(this._optimisticAttrs || {}) };
     const climateAttrs = climateEntityId ? this._hass?.states?.[climateEntityId]?.attributes || {} : {};
     const humidifierAttrs = humidifierEntityId ? this._hass?.states?.[humidifierEntityId]?.attributes || {} : {};
@@ -1287,10 +1393,13 @@ class DysonRemoteCard extends HTMLElement {
           const idx = inferOscillationPresetIndex(attrs, presets);
           const nextIdx = nextOscillationIndex(idx, dir, presets.length);
           const nextDeg = presets[nextIdx];
-          this._applyOptimisticPatch({
-            oscillation_enabled: nextDeg > 0,
-            oscillation_span: nextDeg,
-          });
+          this._applyOptimisticPatch(
+            {
+              oscillation_enabled: nextDeg > 0,
+              oscillation_span: nextDeg,
+            },
+            { oscPresetIndex: nextIdx },
+          );
           await hass.callService(domain, "turn_on", { entity_id: entityId });
           await this._applyOscillationPreset(hass, domain, entityId, nextDeg);
           break;
