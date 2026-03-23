@@ -869,13 +869,13 @@ class DysonRemoteCard extends HTMLElement {
           <button type="button" class="btn-circle" data-action="cooling" aria-label="Cooling">
             <span class="icon-slot" data-ha-icon="mdi:circle" data-ha-size="30"></span>
           </button>
-          <div class="label">Cooling</div>
+          <div class="label" data-part="cooling-label">Cooling</div>
         </div>
         <div class="cell">
           <button type="button" class="btn-circle" data-action="auto_mode" aria-label="Auto mode">
             <span class="auto-word" data-part="auto-word">AUTO</span>
           </button>
-          <div class="label">Auto mode</div>
+          <div class="label" data-part="auto-label">Auto mode</div>
         </div>
 
         <div class="cell">
@@ -1008,6 +1008,16 @@ class DysonRemoteCard extends HTMLElement {
     const autoWord = this._rootEl.querySelector('[data-part="auto-word"]');
     if (autoWord) {
       autoWord.classList.toggle("on", isAutoModeActive(attrs));
+    }
+
+    const coolingLabel = this._rootEl.querySelector('[data-part="cooling-label"]');
+    if (coolingLabel) {
+      coolingLabel.textContent = humidifierMode ? "Auto purify" : "Cooling";
+    }
+
+    const autoLabel = this._rootEl.querySelector('[data-part="auto-label"]');
+    if (autoLabel) {
+      autoLabel.textContent = humidifierMode ? "Auto humidify" : "Auto mode";
     }
 
     const airflowMid = this._rootEl.querySelector('[data-part="airflow-mid"]');

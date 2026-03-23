@@ -277,10 +277,14 @@ describe("dyson-remote-card integration harness", () => {
     const readout = card.shadowRoot.querySelector('[data-part="thermal-target"]');
     const thermal = card.shadowRoot.querySelector('[data-stepper="thermal"]');
     const icon = card.shadowRoot.querySelector('[data-part="thermal-icon"] ha-icon');
+    const coolingLabel = card.shadowRoot.querySelector('[data-part="cooling-label"]');
+    const autoLabel = card.shadowRoot.querySelector('[data-part="auto-label"]');
     expect(label.textContent).toBe("Humidity control");
     expect(readout.textContent).toBe("40%");
     expect(thermal.getAttribute("data-thermal-mode")).toBe("humidity");
     expect(icon.icon).toBe("mdi:water");
+    expect(coolingLabel.textContent).toBe("Auto purify");
+    expect(autoLabel.textContent).toBe("Auto humidify");
   });
 
   test("humidity +/- calls humidifier.set_humidity when humidifier entity exists", async () => {
