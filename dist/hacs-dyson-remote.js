@@ -1258,6 +1258,27 @@ window.customCards.push({
 });
 
 class DysonRemoteCardEditor extends HTMLElement {
+  static get _schema() {
+    return [
+      {
+        name: "entity",
+        selector: {
+          entity: {
+            domain: ["fan", "climate"],
+          },
+        },
+      },
+      {
+        name: "show_temperature_header",
+        selector: { boolean: {} },
+      },
+      {
+        name: "mushroom_shell",
+        selector: { boolean: {} },
+      },
+    ];
+  }
+
   setConfig(config) {
     this._config = {
       entity: "",
@@ -1288,16 +1309,33 @@ class DysonRemoteCardEditor extends HTMLElement {
     if (!this._config) return;
     if (!this.shadowRoot) this.attachShadow({ mode: "open" });
 
-    const c = this._config;
-    const hasEntityPicker = Boolean(customElements.get("ha-entity-picker"));
+    const formTag = customElements.get("ha-form")
+      ? "ha-form"
+      : customElements.get("hui-form")
+        ? "hui-form"
+        : null;
+    const hasForm = Boolean(formTag);
+    if (!hasForm && !this._waitingForForm) {
+      this._waitingForForm = true;
+      const done = () => {
+        this._waitingForForm = false;
+        this._render();
+      };
+      if (!customElements.get("ha-form")) {
+        customElements.whenDefined("ha-form").then(done).catch(() => {});
+      }
+      if (!customElements.get("hui-form")) {
+        customElements.whenDefined("hui-form").then(done).catch(() => {});
+      }
+    }
 
     this.shadowRoot.innerHTML = `
       <style>
         :host { display:block; padding: 8px 0; }
-        .wrap { display:grid; gap: 12px; }
-        .row { display:grid; gap: 6px; }
-        label { font-size: 13px; color: var(--secondary-text-color); }
-        input[type="text"] {
+        .wrap { display:grid; gap: 10px; }
+        .fallback { display:grid; gap: 8px; }
+        .fallback label { font-size: 13px; color: var(--secondary-text-color); }
+        .fallback input[type="text"] {
           width: 100%;
           box-sizing: border-box;
           padding: 8px 10px;
@@ -1306,62 +1344,43 @@ class DysonRemoteCardEditor extends HTMLElement {
           background: var(--card-background-color);
           color: var(--primary-text-color);
         }
-        .toggle { display:flex; align-items:center; gap: 10px; }
-        .toggle input[type="checkbox"] {
-          width: 16px;
-          height: 16px;
-          margin: 0;
+        .hint {
+          font-size: 12px;
+          color: var(--secondary-text-color);
+          opacity: 0.8;
         }
       </style>
       <div class="wrap">
-        <div class="row">
-          <label>Entity</label>
-          ${
-            hasEntityPicker
-              ? `<ha-entity-picker id="entityPicker" allow-custom-entity></ha-entity-picker>`
-              : `<input id="entityInput" type="text" value="${c.entity || ""}" placeholder="fan.dyson_... or climate.dyson_..." />`
-          }
-        </div>
-        <div class="toggle">
-          <input id="showTemp" type="checkbox" />
-          <label for="showTemp">Show temperature header</label>
-        </div>
-        <div class="toggle">
-          <input id="mushroom" type="checkbox" />
-          <label for="mushroom">Use mushroom-style shell</label>
-        </div>
+        ${hasForm ? `<${formTag} id="form"></${formTag}>` : `
+          <div class="fallback">
+            <label>Entity (fan.* or climate.*)</label>
+            <input id="entityInput" type="text" value="${this._config.entity || ""}" placeholder="fan.dyson_... or climate.dyson_..." />
+            <div class="hint">Waiting for Home Assistant form components...</div>
+          </div>
+        `}
       </div>
     `;
 
-    if (hasEntityPicker) {
-      const picker = this.shadowRoot.getElementById("entityPicker");
-      picker.hass = this._hass;
-      picker.value = c.entity || "";
-      picker.includeDomains = ["fan", "climate"];
-      picker.addEventListener("value-changed", (ev) => {
-        const nextEntity = ev.detail?.value || "";
-        this._emitConfig({ ...this._config, entity: nextEntity });
+    if (hasForm) {
+      const form = this.shadowRoot.getElementById("form");
+      form.hass = this._hass;
+      form.data = this._config;
+      form.schema = DysonRemoteCardEditor._schema;
+      form.computeLabel = (schema) => {
+        if (schema.name === "entity") return "Entity";
+        if (schema.name === "show_temperature_header") return "Show temperature header";
+        if (schema.name === "mushroom_shell") return "Use mushroom-style shell";
+        return schema.name;
+      };
+      form.addEventListener("value-changed", (ev) => {
+        this._emitConfig({ ...this._config, ...(ev.detail?.value || {}) });
       });
     } else {
       const entityInput = this.shadowRoot.getElementById("entityInput");
-      entityInput.value = c.entity || "";
       entityInput.addEventListener("change", () => {
         this._emitConfig({ ...this._config, entity: entityInput.value.trim() });
       });
     }
-
-    const showTemp = this.shadowRoot.getElementById("showTemp");
-    showTemp.checked = c.show_temperature_header !== false;
-    showTemp.addEventListener("input", () => {
-      this._emitConfig({ ...this._config, show_temperature_header: showTemp.checked });
-    });
-
-    const mushroom = this.shadowRoot.getElementById("mushroom");
-    mushroom.checked = c.mushroom_shell !== false;
-    mushroom.addEventListener("input", () => {
-      this._emitConfig({ ...this._config, mushroom_shell: mushroom.checked });
-    });
-
   }
 }
 
