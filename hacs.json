@@ -1,0 +1,6 @@
+{
+  "name": "Dyson Remote",
+  "render_readme": true,
+  "filename": "hacs-dyson-remote.js",
+  "homeassistant": "2024.1.0"
+}

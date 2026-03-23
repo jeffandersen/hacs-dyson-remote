@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Dyson Card Harness</title>
+    <style>
+      body {
+        margin: 0;
+        background: #0b0b0c;
+        color: #fff;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      .wrap {
+        display: grid;
+        grid-template-columns: 360px minmax(340px, 460px);
+        gap: 16px;
+        min-height: 100vh;
+        align-items: start;
+        padding: 16px;
+        box-sizing: border-box;
+      }
+      .panel {
+        background: #161618;
+        border-radius: 12px;
+        padding: 12px;
+      }
+      label {
+        display: block;
+        margin: 8px 0;
+        font-size: 13px;
+      }
+      .row {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+      }
+      input,
+      select,
+      button {
+        width: 100%;
+        box-sizing: border-box;
+      }
+      pre {
+        white-space: pre-wrap;
+        font-size: 12px;
+        background: #0d0d0e;
+        border-radius: 8px;
+        padding: 8px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="panel">
+        <h3>State Controls</h3>
+        <label><input id="is_on" type="checkbox" checked /> is_on</label>
+        <label><input id="auto_mode" type="checkbox" /> auto_mode</label>
+        <label><input id="heat_on" type="checkbox" /> heating_mode = ON</label>
+        <label><input id="osc_on" type="checkbox" /> oscillation_enabled</label>
+        <div class="row">
+          <label>percentage<input id="percentage" type="number" value="40" /></label>
+          <label>target_temperature<input id="target" type="number" value="21" step="0.5" /></label>
+        </div>
+        <div class="row">
+          <label>current_temperature<input id="current" type="number" value="21" step="0.5" /></label>
+          <label>oscillation_span<input id="span" type="number" value="0" /></label>
+        </div>
+        <button id="apply">Apply state</button>
+        <h3>Last Service Calls</h3>
+        <pre id="calls"></pre>
+      </div>
+      <div class="panel" id="card_mount"></div>
+    </div>
+
+    <script>
+      if (!customElements.get("ha-icon")) {
+        customElements.define(
+          "ha-icon",
+          class extends HTMLElement {
+            connectedCallback() {
+              const icon = this.getAttribute("icon") || this.icon || "mdi:checkbox-blank-circle";
+              const span = document.createElement("span");
+              span.textContent = icon.replace("mdi:", "");
+              span.style.fontSize = "10px";
+              span.style.opacity = "0.75";
+              this.replaceChildren(span);
+            }
+          },
+        );
+      }
+    </script>
+    <script type="module">
+      import "../src/hacs-dyson-remote.js";
+
+      const entityId = "fan.dyson_device";
+      const callsEl = document.getElementById("calls");
+      const state = {
+        is_on: true,
+        auto_mode: false,
+        heating_mode: "OFF",
+        oscillation_enabled: false,
+        oscillation_span: 0,
+        percentage: 40,
+        percentage_step: 10,
+        target_temperature: 21,
+        current_temperature: 21,
+        preset_modes: ["Auto", "Manual", "Heat"],
+        preset_mode: "Manual",
+        min_temp: 7,
+        max_temp: 37,
+        temperature_step: 0.5,
+        temperature_unit: "°C",
+        night_mode: false,
+      };
+
+      const hass = {
+        states: {
+          [entityId]: { state: "on", attributes: state },
+        },
+        services: {
+          fan: { turn_on: {}, turn_off: {}, set_percentage: {}, set_temperature: {}, oscillate: {}, set_preset_mode: {} },
+          dyson: { set_angle: {} },
+        },
+        async callService(domain, service, data) {
+          callsEl.textContent = JSON.stringify({ domain, service, data }, null, 2);
+        },
+      };
+
+      const card = document.createElement("dyson-remote-card");
+      card.setConfig({ entity: entityId, oscillation_presets: [0, 45, 90, 180, 350] });
+      card.hass = hass;
+      document.getElementById("card_mount").appendChild(card);
+
+      document.getElementById("apply").addEventListener("click", () => {
+        state.is_on = document.getElementById("is_on").checked;
+        state.auto_mode = document.getElementById("auto_mode").checked;
+        state.heating_mode = document.getElementById("heat_on").checked ? "ON" : "OFF";
+        state.oscillation_enabled = document.getElementById("osc_on").checked;
+        state.percentage = Number(document.getElementById("percentage").value);
+        state.target_temperature = Number(document.getElementById("target").value);
+        state.current_temperature = Number(document.getElementById("current").value);
+        state.oscillation_span = Number(document.getElementById("span").value);
+        card.hass = hass;
+      });
+    </script>
+  </body>
+</html>
