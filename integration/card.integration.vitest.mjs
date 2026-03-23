@@ -49,7 +49,8 @@ function createMockHass(overrides = {}) {
     states,
     services: {
       fan: { turn_on: {}, turn_off: {}, set_percentage: {}, set_temperature: {}, oscillate: {}, set_preset_mode: {} },
-      climate: { set_hvac_mode: {}, set_temperature: {} },
+      climate: { set_hvac_mode: {}, set_temperature: {}, set_humidity: {} },
+      humidifier: { turn_on: {}, turn_off: {}, set_humidity: {} },
       dyson: { set_angle: {}, set_night_mode: {} },
     },
     callService: async (domain, service, data) => {
@@ -242,9 +243,79 @@ describe("dyson-remote-card integration harness", () => {
     });
     const card = createCard(hass);
     const airflow = card.shadowRoot.querySelector('[data-part="airflow-mid"]');
-    const heating = card.shadowRoot.querySelector('[data-part="heat-target"]');
+    const heating = card.shadowRoot.querySelector('[data-part="thermal-target"]');
     expect(airflow.textContent).toBe("OFF");
     expect(heating.textContent).toBe("OFF");
+  });
+
+  test("humidifier capability switches thermal control label and icon", () => {
+    const hass = createMockHass({
+      states: {
+        [FAN_ENTITY_ID]: {
+          state: "on",
+          attributes: {
+            is_on: true,
+            percentage: 50,
+            humidity_enabled: "ON",
+            target_humidity: 40,
+            min_humidity: 30,
+            max_humidity: 70,
+          },
+        },
+        "humidifier.dyson_device": {
+          state: "on",
+          attributes: {
+            min_humidity: 30,
+            max_humidity: 70,
+            humidity: 40,
+          },
+        },
+      },
+    });
+    const card = createCard(hass);
+    const label = card.shadowRoot.querySelector('[data-part="thermal-label"]');
+    const readout = card.shadowRoot.querySelector('[data-part="thermal-target"]');
+    const thermal = card.shadowRoot.querySelector('[data-stepper="thermal"]');
+    const icon = card.shadowRoot.querySelector('[data-part="thermal-icon"] ha-icon');
+    expect(label.textContent).toBe("Humidity control");
+    expect(readout.textContent).toBe("40%");
+    expect(thermal.getAttribute("data-thermal-mode")).toBe("humidity");
+    expect(icon.icon).toBe("mdi:water");
+  });
+
+  test("humidity +/- calls humidifier.set_humidity when humidifier entity exists", async () => {
+    const hass = createMockHass({
+      states: {
+        [FAN_ENTITY_ID]: {
+          state: "on",
+          attributes: {
+            is_on: true,
+            target_humidity: 40,
+            humidity_enabled: "ON",
+            min_humidity: 30,
+            max_humidity: 50,
+          },
+        },
+        "humidifier.dyson_device": {
+          state: "on",
+          attributes: {
+            min_humidity: 30,
+            max_humidity: 70,
+            humidity: 40,
+          },
+        },
+      },
+    });
+    const card = createCard(hass);
+    const plus = card.shadowRoot.querySelector('button[data-action="heat_plus"]');
+    plus.click();
+    await nextTick();
+
+    const humidifierCall = hass.__calls.find(
+      (c) => c.domain === "humidifier" && c.service === "set_humidity" && c.data.entity_id === "humidifier.dyson_device",
+    );
+    expect(humidifierCall).toBeTruthy();
+    expect(humidifierCall.data.humidity).toBe(41);
   });
 
   test("night action does not send night_mode via fan.turn_on", async () => {

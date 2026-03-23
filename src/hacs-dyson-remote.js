@@ -35,6 +35,16 @@ function relatedClimateEntityId(hass, fanEntityId) {
   return null;
 }
 
+function relatedHumidifierEntityId(hass, baseEntityId) {
+  if (!baseEntityId || typeof baseEntityId !== "string") return null;
+  const idx = baseEntityId.indexOf(".");
+  if (idx < 0) return null;
+  const objectId = baseEntityId.slice(idx + 1);
+  const candidate = `humidifier.${objectId}`;
+  if (hass?.states?.[candidate]) return candidate;
+  return null;
+}
+
 function relatedFanEntityId(hass, climateEntityId) {
   if (!climateEntityId || typeof climateEntityId !== "string") return null;
   const idx = climateEntityId.indexOf(".");
@@ -45,25 +55,76 @@ function relatedFanEntityId(hass, climateEntityId) {
   return null;
 }
 
+function humidityRange(attrs) {
+  const a = attrs || {};
+  const minRaw = typeof a.min_humidity === "number" ? a.min_humidity : 30;
+  const maxRaw = typeof a.max_humidity === "number" ? a.max_humidity : 70;
+  const lo = Math.min(minRaw, maxRaw);
+  const hi = Math.max(minRaw, maxRaw);
+  return { min: lo, max: hi, step: 1 };
+}
+
+function inferTargetHumidity(attrs) {
+  const a = attrs || {};
+  const candidates = [a.target_humidity, a.humidity];
+  for (const value of candidates) {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return value;
+    }
+  }
+  return null;
+}
+
+function isHumidityEnabled(attrs) {
+  const a = attrs || {};
+  if (typeof a.humidity_enabled === "string") return a.humidity_enabled.toUpperCase() === "ON";
+  if (typeof a.humidity_enabled === "boolean") return a.humidity_enabled;
+  if (typeof a.is_on === "boolean") return a.is_on;
+  return false;
+}
+
+function humidityCapability(fanAttrs, climateAttrs, humidifierAttrs) {
+  const combined = { ...(fanAttrs || {}), ...(climateAttrs || {}), ...(humidifierAttrs || {}) };
+  const hasHumidityBounds =
+    (typeof combined.min_humidity === "number" && Number.isFinite(combined.min_humidity)) ||
+    (typeof combined.max_humidity === "number" && Number.isFinite(combined.max_humidity));
+  const hasHumidityValue =
+    (typeof combined.target_humidity === "number" && Number.isFinite(combined.target_humidity)) ||
+    (typeof combined.humidity === "number" && Number.isFinite(combined.humidity)) ||
+    typeof combined.humidity_enabled !== "undefined";
+  return hasHumidityBounds || hasHumidityValue;
+}
+
 function resolveEntityPair(hass, configuredEntityId) {
   if (!configuredEntityId || typeof configuredEntityId !== "string") {
-    return { fanEntityId: null, climateEntityId: null };
+    return { fanEntityId: null, climateEntityId: null, humidifierEntityId: null };
   }
   if (configuredEntityId.startsWith("fan.")) {
     return {
       fanEntityId: configuredEntityId,
       climateEntityId: relatedClimateEntityId(hass, configuredEntityId),
+      humidifierEntityId: relatedHumidifierEntityId(hass, configuredEntityId),
     };
   }
   if (configuredEntityId.startsWith("climate.")) {
     return {
       fanEntityId: relatedFanEntityId(hass, configuredEntityId),
       climateEntityId: configuredEntityId,
+      humidifierEntityId: relatedHumidifierEntityId(hass, configuredEntityId),
+    };
+  }
+  if (configuredEntityId.startsWith("humidifier.")) {
+    const climateId = configuredEntityId.replace(/^humidifier\./, "climate.");
+    return {
+      fanEntityId: relatedFanEntityId(hass, climateId),
+      climateEntityId: hass?.states?.[climateId] ? climateId : null,
+      humidifierEntityId: configuredEntityId,
     };
   }
   return {
     fanEntityId: configuredEntityId,
     climateEntityId: relatedClimateEntityId(hass, configuredEntityId),
+    humidifierEntityId: relatedHumidifierEntityId(hass, configuredEntityId),
   };
 }
 
@@ -488,12 +549,16 @@ class DysonRemoteCard extends HTMLElement {
         color: var(--drc-blue);
         filter: drop-shadow(0 0 10px rgba(90, 200, 250, 0.45));
       }
-      [data-stepper="heating"]:not(.is-engaged) .icon-slot {
+      [data-stepper="thermal"]:not(.is-engaged) .icon-slot {
         color: rgba(255, 255, 255, 0.45);
       }
-      [data-stepper="heating"].is-engaged .icon-slot {
+      [data-stepper="thermal"].is-engaged .icon-slot {
         color: var(--drc-red);
         filter: drop-shadow(0 0 8px rgba(255, 59, 48, 0.35));
+      }
+      [data-stepper="thermal"][data-thermal-mode="humidity"].is-engaged .icon-slot {
+        color: var(--drc-blue);
+        filter: drop-shadow(0 0 8px rgba(90, 200, 250, 0.35));
       }
       [data-stepper="oscillation"]:not(.is-engaged) .icon-slot {
         color: rgba(255, 255, 255, 0.45);
@@ -608,15 +673,15 @@ class DysonRemoteCard extends HTMLElement {
           <div class="label">Airflow speed</div>
         </div>
         <div class="cell">
-          <div class="stepper-pill" data-stepper="heating" aria-label="Heating target temperature">
-            <span class="icon-slot" data-ha-icon="mdi:radiator" data-ha-size="26"></span>
+          <div class="stepper-pill" data-stepper="thermal" data-thermal-mode="temperature" aria-label="Heating target temperature">
+            <span class="icon-slot" data-part="thermal-icon" data-ha-icon="mdi:radiator" data-ha-size="26"></span>
             <div class="stepper-col">
               <button type="button" class="stepper-btn" data-action="heat_plus" aria-label="Raise target temperature">+</button>
-              <span class="stepper-readout muted" data-part="heat-target">—</span>
+              <span class="stepper-readout muted" data-part="thermal-target">—</span>
               <button type="button" class="stepper-btn" data-action="heat_minus" aria-label="Lower target temperature">−</button>
             </div>
           </div>
-          <div class="label">Heating</div>
+          <div class="label" data-part="thermal-label">Heating</div>
         </div>
         <div class="cell">
           <div class="stepper-pill" data-stepper="oscillation" aria-label="Oscillation angle">
@@ -676,8 +741,8 @@ class DysonRemoteCard extends HTMLElement {
       auto_mode: ['button[data-action="auto_mode"]'],
       airflow_plus: ['[data-stepper="airflow"]'],
       airflow_minus: ['[data-stepper="airflow"]'],
-      heat_plus: ['[data-stepper="heating"]'],
-      heat_minus: ['[data-stepper="heating"]'],
+      heat_plus: ['[data-stepper="thermal"]'],
+      heat_minus: ['[data-stepper="thermal"]'],
       osc_plus: ['[data-stepper="oscillation"]'],
       osc_minus: ['[data-stepper="oscillation"]'],
       night: ['button[data-action="night"]'],
@@ -708,11 +773,13 @@ class DysonRemoteCard extends HTMLElement {
 
   _updateDynamic() {
     if (!this._rootEl || !this._hass) return;
-    const { fanEntityId, climateEntityId } = resolveEntityPair(this._hass, this._config.entity);
+    const { fanEntityId, climateEntityId, humidifierEntityId } = resolveEntityPair(this._hass, this._config.entity);
     const st = fanEntityId ? entityState(this._hass, fanEntityId) : entityState(this._hass, this._config.entity);
     const attrs = { ...(st?.attributes || {}), ...(this._optimisticAttrs || {}) };
     const climateAttrs = climateEntityId ? this._hass?.states?.[climateEntityId]?.attributes || {} : {};
+    const humidifierAttrs = humidifierEntityId ? this._hass?.states?.[humidifierEntityId]?.attributes || {} : {};
     const thermalAttrs = mergedThermalAttrs(attrs, climateAttrs);
+    const humidifierMode = humidityCapability(attrs, climateAttrs, humidifierAttrs);
 
     const tempEl = this._rootEl.querySelector('[data-part="temp"]');
     if (tempEl && this._config.show_temperature_header) {
@@ -734,11 +801,35 @@ class DysonRemoteCard extends HTMLElement {
       airflowMid.classList.toggle("muted", label === "—");
     }
 
-    const heatTarget = this._rootEl.querySelector('[data-part="heat-target"]');
-    if (heatTarget) {
-      const readout = isHeatActive(attrs) ? heatingTargetReadout(thermalAttrs) : "OFF";
-      heatTarget.textContent = readout;
-      heatTarget.classList.toggle("muted", readout === "—" || readout === "OFF");
+    const thermalTarget = this._rootEl.querySelector('[data-part="thermal-target"]');
+    if (thermalTarget) {
+      let readout = "OFF";
+      if (humidifierMode) {
+        const target = inferTargetHumidity({ ...attrs, ...climateAttrs, ...humidifierAttrs });
+        readout = isHumidityEnabled({ ...attrs, ...climateAttrs, ...humidifierAttrs }) && target != null ? `${Math.round(target)}%` : "OFF";
+      } else {
+        readout = isHeatActive(attrs) ? heatingTargetReadout(thermalAttrs) : "OFF";
+      }
+      thermalTarget.textContent = readout;
+      thermalTarget.classList.toggle("muted", readout === "—" || readout === "OFF");
+    }
+
+    const thermalLabel = this._rootEl.querySelector('[data-part="thermal-label"]');
+    if (thermalLabel) thermalLabel.textContent = humidifierMode ? "Humidity control" : "Heating";
+
+    const thermalStepper = this._rootEl.querySelector('[data-stepper="thermal"]');
+    if (thermalStepper) {
+      thermalStepper.setAttribute("data-thermal-mode", humidifierMode ? "humidity" : "temperature");
+      thermalStepper.setAttribute(
+        "aria-label",
+        humidifierMode ? "Humidity target control" : "Heating target temperature",
+      );
+    }
+
+    const thermalIconSlot = this._rootEl.querySelector('[data-part="thermal-icon"]');
+    if (thermalIconSlot) {
+      const icon = humidifierMode ? "mdi:water" : "mdi:radiator";
+      mountHaIcon(thermalIconSlot, icon, 26);
     }
 
     const presets = this._config.oscillation_presets || normalizeOscillationPresets(null);
@@ -754,7 +845,10 @@ class DysonRemoteCard extends HTMLElement {
     this._toggleEngaged('button[data-action="cooling"]', coolingDotActive(attrs));
     this._toggleEngaged('button[data-action="auto_mode"]', isAutoModeActive(attrs));
     this._toggleEngaged('[data-stepper="airflow"]', isAirflowControlEngaged(st, attrs));
-    this._toggleEngaged('[data-stepper="heating"]', isHeatActive(attrs));
+    this._toggleEngaged(
+      '[data-stepper="thermal"]',
+      humidifierMode ? isHumidityEnabled({ ...attrs, ...climateAttrs, ...humidifierAttrs }) : isHeatActive(attrs),
+    );
     this._toggleEngaged('[data-stepper="oscillation"]', attrs.oscillation_enabled === true);
     this._toggleEngaged('button[data-action="night"]', isNightModeActive(attrs));
   }
@@ -763,14 +857,16 @@ class DysonRemoteCard extends HTMLElement {
     const hass = this._hass;
     const configuredEntityId = this._config.entity;
     if (!hass || !configuredEntityId) return;
-    const { fanEntityId, climateEntityId } = resolveEntityPair(hass, configuredEntityId);
+    const { fanEntityId, climateEntityId, humidifierEntityId } = resolveEntityPair(hass, configuredEntityId);
     const entityId = fanEntityId || configuredEntityId;
     if (!entityId) return;
 
     const st = entityState(hass, entityId);
     const attrs = st?.attributes || {};
     const climateAttrs = climateEntityId ? hass?.states?.[climateEntityId]?.attributes || {} : {};
+    const humidifierAttrs = humidifierEntityId ? hass?.states?.[humidifierEntityId]?.attributes || {} : {};
     const thermalAttrs = mergedThermalAttrs(attrs, climateAttrs);
+    const humidifierMode = humidityCapability(attrs, climateAttrs, humidifierAttrs);
     const domain = entityId.split(".")[0] || "fan";
 
     if (this._pendingActions.has(action)) return;
@@ -845,17 +941,50 @@ class DysonRemoteCard extends HTMLElement {
         }
         case "heat_minus":
         case "heat_plus": {
-          const dir = action === "heat_minus" ? -1 : 1;
-          const next = adjustTargetTemperature(thermalAttrs.target_temperature, dir, thermalAttrs);
-          this._applyOptimisticPatch({ target_temperature: next });
-          await hass.callService(domain, "turn_on", { entity_id: entityId });
-          const ok = await this._setTargetTemperature(hass, domain, entityId, next);
-          if (!ok) {
-            console.warn(
-              "Dyson Remote: No set_temperature target available for",
-              entityId,
-              "(tried fan.set_temperature and related climate entity)",
-            );
+          if (humidifierMode) {
+            const sourceAttrs = { ...attrs, ...climateAttrs, ...humidifierAttrs };
+            const { min, max } = humidityRange(sourceAttrs);
+            const dir = action === "heat_minus" ? -1 : 1;
+            const base = inferTargetHumidity(sourceAttrs);
+            const current = base == null ? min : Math.max(min, Math.min(max, Math.round(base)));
+            const next = Math.max(min, Math.min(max, current + dir));
+            const patch = {
+              target_humidity: next,
+              humidity: next,
+              humidity_enabled: "ON",
+            };
+            this._applyOptimisticPatch(patch);
+            if (domain === "fan") {
+              await hass.callService(domain, "turn_on", { entity_id: entityId });
+            } else if (domain === "humidifier") {
+              await hass.callService("humidifier", "turn_on", { entity_id: entityId });
+            }
+            if (humidifierEntityId && hass?.services?.humidifier?.set_humidity) {
+              await hass.callService("humidifier", "set_humidity", { entity_id: humidifierEntityId, humidity: next });
+            } else if (hass?.services?.humidifier?.set_humidity && domain === "humidifier") {
+              await hass.callService("humidifier", "set_humidity", { entity_id: entityId, humidity: next });
+            } else if (climateEntityId && hass?.services?.climate?.set_humidity) {
+              await hass.callService("climate", "set_humidity", { entity_id: climateEntityId, humidity: next });
+            } else {
+              console.warn(
+                "Dyson Remote: No humidity target service available for",
+                entityId,
+                "(tried humidifier.set_humidity and related climate entity)",
+              );
+            }
+          } else {
+            const dir = action === "heat_minus" ? -1 : 1;
+            const next = adjustTargetTemperature(thermalAttrs.target_temperature, dir, thermalAttrs);
+            this._applyOptimisticPatch({ target_temperature: next });
+            await hass.callService(domain, "turn_on", { entity_id: entityId });
+            const ok = await this._setTargetTemperature(hass, domain, entityId, next);
+            if (!ok) {
+              console.warn(
+                "Dyson Remote: No set_temperature target available for",
+                entityId,
+                "(tried fan.set_temperature and related climate entity)",
+              );
+            }
           }
           break;
         }
@@ -943,7 +1072,7 @@ class DysonRemoteCardEditor extends HTMLElement {
     if (!this.shadowRoot) this.attachShadow({ mode: "open" });
 
     const c = this._config;
-    const osc = Array.isArray(c.oscillation_presets) ? c.oscillation_presets.join(", ") : "0, 45, 90, 180, 350";
+    const hasEntityPicker = Boolean(customElements.get("ha-entity-picker"));
 
     this.shadowRoot.innerHTML = `
       <style>
@@ -969,8 +1098,12 @@ class DysonRemoteCardEditor extends HTMLElement {
       </style>
       <div class="wrap">
         <div class="row">
-          <label>Entity (fan.* or climate.*)</label>
-          <input id="entity" type="text" value="${c.entity || ""}" placeholder="fan.dyson_... or climate.dyson_..." />
+          <label>Entity</label>
+          ${
+            hasEntityPicker
+              ? `<ha-entity-picker id="entityPicker" allow-custom-entity></ha-entity-picker>`
+              : `<input id="entityInput" type="text" value="${c.entity || ""}" placeholder="fan.dyson_... or climate.dyson_..." />`
+          }
         </div>
         <div class="toggle">
           <input id="showTemp" type="checkbox" />
@@ -980,18 +1113,25 @@ class DysonRemoteCardEditor extends HTMLElement {
           <input id="mushroom" type="checkbox" />
           <label for="mushroom">Use mushroom-style shell</label>
         </div>
-        <div class="row">
-          <label>Oscillation presets (comma-separated degrees)</label>
-          <input id="osc" type="text" value="${osc}" />
-        </div>
       </div>
     `;
 
-    const entityInput = this.shadowRoot.getElementById("entity");
-    entityInput.value = c.entity || "";
-    entityInput.addEventListener("change", () => {
-      this._emitConfig({ ...this._config, entity: entityInput.value.trim() });
-    });
+    if (hasEntityPicker) {
+      const picker = this.shadowRoot.getElementById("entityPicker");
+      picker.hass = this._hass;
+      picker.value = c.entity || "";
+      picker.includeDomains = ["fan", "climate"];
+      picker.addEventListener("value-changed", (ev) => {
+        const nextEntity = ev.detail?.value || "";
+        this._emitConfig({ ...this._config, entity: nextEntity });
+      });
+    } else {
+      const entityInput = this.shadowRoot.getElementById("entityInput");
+      entityInput.value = c.entity || "";
+      entityInput.addEventListener("change", () => {
+        this._emitConfig({ ...this._config, entity: entityInput.value.trim() });
+      });
+    }
 
     const showTemp = this.shadowRoot.getElementById("showTemp");
     showTemp.checked = c.show_temperature_header !== false;
@@ -1005,17 +1145,6 @@ class DysonRemoteCardEditor extends HTMLElement {
       this._emitConfig({ ...this._config, mushroom_shell: mushroom.checked });
     });
 
-    const oscInput = this.shadowRoot.getElementById("osc");
-    oscInput.addEventListener("change", () => {
-      const values = String(oscInput.value || "")
-        .split(",")
-        .map((v) => Number(v.trim()))
-        .filter((v) => Number.isFinite(v) && v >= 0);
-      this._emitConfig({
-        ...this._config,
-        oscillation_presets: values.length ? values : [0, 45, 90, 180, 350],
-      });
-    });
   }
 }
 

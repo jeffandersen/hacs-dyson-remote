@@ -3,7 +3,7 @@
 A Lovelace card built to mimic the Dyson iOS control experience in Home Assistant for Dyson fan and humidifier devices.
 
 - Top row: Power, Cooling, Auto
-- Middle row: Airflow `+/-`, Heating `+/-`, Oscillation stepper
+- Middle row: Airflow `+/-`, Heating or Humidity `+/-` (auto-detected), Oscillation stepper
 - Bottom row: Night mode
 
 The card is designed for Dyson fan entities (including fan-based Dyson purifier/humidifier models) while using standard Home Assistant services whenever possible.
@@ -56,10 +56,10 @@ This card now includes a visual config editor, so Home Assistant should no longe
 | Control | Behavior |
 |--------|----------|
 | On/Off | Turns device on or off |
-| Cooling | Switches to cooling behavior (integration-dependent) |
-| Auto | Toggles Auto/Manual when those presets exist |
+| Cooling | Forces cooling/fan-only behavior where supported (integration-dependent) |
+| Auto mode | Toggles Auto/Manual when those presets exist |
 | Airflow `+/-` | Shows app-style speed levels (**OFF, 1..10**) and maps them to fan percentage internally |
-| Heating `+/-` | Changes target temperature in steps |
+| Heating/Humidity `+/-` | Uses one thermal stepper: adjusts target temperature on heat-capable devices, or target humidity on humidifier-capable devices (auto-detected by entity capabilities) |
 | Oscillation `+/-` | Cycles configured oscillation angles |
 | Night mode | Toggles night mode when supported |
 
