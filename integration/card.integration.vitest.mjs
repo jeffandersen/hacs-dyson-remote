@@ -53,6 +53,7 @@ function createMockHass(overrides = {}) {
       climate: { set_hvac_mode: {}, set_temperature: {}, set_humidity: {} },
       humidifier: { turn_on: {}, turn_off: {}, set_humidity: {} },
       dyson: { set_angle: {}, set_night_mode: {} },
+      select: { select_option: {} },
     },
     callService: async (domain, service, data) => {
       calls.push({ domain, service, data });
@@ -126,6 +127,83 @@ describe("dyson-remote-card integration harness", () => {
     );
     expect(hasSetAngle).toBe(true);
     expect(hasOscillateOn).toBe(true);
+  });
+
+  test("oscillation uses select.select_option when select.<fan>_oscillation exists", async () => {
+    const selectId = "select.dyson_device_oscillation";
+    const hass = createMockHass();
+    hass.states[selectId] = {
+      state: "45°",
+      attributes: {
+        options: ["45°", "90°", "180°", "350°", "Custom"],
+      },
+    };
+    const card = createCard(hass);
+    const plus = card.shadowRoot.querySelector('button[data-action="osc_plus"]');
+    plus.click();
+    await nextTick();
+
+    const selectCall = hass.__calls.find((c) => c.domain === "select" && c.service === "select_option");
+    expect(selectCall).toBeTruthy();
+    expect(selectCall.data.entity_id).toBe(selectId);
+    expect(selectCall.data.option).toBe("45°");
+
+    const hasSetAngle = hass.__calls.some((c) => c.domain === "dyson" && c.service === "set_angle");
+    expect(hasSetAngle).toBe(false);
+  });
+
+  test("oscillation readout uses select.oscillation_enabled when fan attrs disagree", () => {
+    const selectId = "select.dyson_device_oscillation";
+    const hass = createMockHass();
+    hass.states[FAN_ENTITY_ID].attributes.oscillation_enabled = true;
+    hass.states[FAN_ENTITY_ID].attributes.oscillation_span = 45;
+    hass.states[selectId] = {
+      state: "45°",
+      attributes: {
+        options: ["45°", "90°", "180°", "350°", "Custom"],
+        oscillation_enabled: false,
+        oscillation_mode: "45°",
+        oscillation_span: 45,
+      },
+    };
+    const card = createCard(hass);
+    const oscMid = card.shadowRoot.querySelector('[data-part="osc-mid"]');
+    expect(oscMid.textContent).toBe("OFF");
+  });
+
+  test("oscillation readout uses fan attrs when select only has options + state (no oscillation_* keys)", () => {
+    const selectId = "select.dyson_device_oscillation";
+    const hass = createMockHass();
+    hass.states[FAN_ENTITY_ID].attributes.oscillating = false;
+    hass.states[FAN_ENTITY_ID].attributes.oscillation_enabled = false;
+    hass.states[FAN_ENTITY_ID].attributes.oscillation_span = 0;
+    hass.states[selectId] = {
+      state: "45°",
+      attributes: {
+        options: ["45°", "90°", "180°", "350°", "Breeze", "Custom"],
+      },
+    };
+    const card = createCard(hass);
+    const oscMid = card.shadowRoot.querySelector('[data-part="osc-mid"]');
+    expect(oscMid.textContent).toBe("OFF");
+  });
+
+  test("oscillation select auto-discovery supports non-default select id suffixes", () => {
+    const hass = createMockHass();
+    hass.states[FAN_ENTITY_ID].attributes.oscillation_enabled = true;
+    hass.states[FAN_ENTITY_ID].attributes.oscillation_span = 45;
+    hass.states["select.dyson_device_oscillation_mode"] = {
+      state: "45°",
+      attributes: {
+        options: ["45°", "90°", "180°", "350°", "Breeze", "Custom"],
+        oscillation_enabled: false,
+        oscillation_mode: "45°",
+        oscillation_span: 0,
+      },
+    };
+    const card = createCard(hass);
+    const oscMid = card.shadowRoot.querySelector('[data-part="osc-mid"]');
+    expect(oscMid.textContent).toBe("OFF");
   });
 
   test("heating +/- does not send temperature to fan.turn_on", async () => {

@@ -45,9 +45,15 @@ title: Living Room
 show_temperature_header: false
 mushroom_shell: true
 oscillation_presets: [0, 45, 90, 180, 350]
+# Optional: only if auto-discovery cannot find your oscillation select (rare)
+oscillation_select_entity: select.dyson_zz7_ca_mja1790a_oscillation
 ```
 
 `title` is optional. If omitted or blank, the title row is hidden (no fallback title is shown).
+
+**Oscillation:** Many Dyson integrations (e.g. libdyson) control sweep angle via a **`select.*_oscillation`** entity (`45°`, `90°`, etc.), not only `fan.oscillate`. The card auto-picks **`select.<fan_object_id>_oscillation`**, then any **`select.*`** whose id contains the same device id and `oscillation` and whose options look like angle presets. It calls `select.select_option` on that entity when possible. You do **not** need **`oscillation_select_entity`** unless discovery fails for your setup.
+
+The **readout and highlighted stepper** treat oscillation as **off** when **`oscillation_enabled`** is false (including string `"false"`), **`oscillating`** is false on the fan, or **`oscillation_span`** is 0—even if **`oscillation_mode`** / the select **state** still shows a remembered angle like `45°`. That matches libdyson: the angle preset can remain while sweep is disabled.
 
 ### Dashboard sizing (Sections view)
 
@@ -63,7 +69,7 @@ This card now includes a visual config editor, so Home Assistant should no longe
 | Auto mode | Toggles Auto/Manual when those presets exist |
 | Airflow `+/-` | Shows app-style speed levels (**OFF, 1..10**) and maps them to fan percentage internally |
 | Heating/Humidity `+/-` | Uses one thermal stepper: adjusts target temperature on heat-capable devices, or target humidity on humidifier-capable devices (auto-detected by entity capabilities) |
-| Oscillation `+/-` | Cycles configured oscillation angles |
+| Oscillation `+/-` | Cycles configured angles; prefers `select.*_oscillation` when present, else `dyson.set_angle` / `fan.oscillate` |
 | Night mode | Toggles night mode when supported |
 
 Note: Dyson integrations differ. If your setup uses different services or entity types, use scripts/automations as adapters.

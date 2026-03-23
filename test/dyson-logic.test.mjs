@@ -21,6 +21,8 @@ import {
   nextOscillationIndex,
   normalizeOscillationPresets,
   normalizePresetModes,
+  oscillationDisplayFromSelect,
+  oscillationIsEnabled,
   oscillationPresetLabel,
   snapTemperatureToStep,
   temperatureStepAndBounds,
@@ -75,6 +77,69 @@ test("inferOscillationPresetIndex", () => {
   const p = [0, 45, 90, 180, 350];
   assert.equal(inferOscillationPresetIndex({ oscillation_enabled: false }, p), 0);
   assert.equal(inferOscillationPresetIndex({ oscillation_enabled: true, oscillation_span: 88 }, p), 2);
+  assert.equal(inferOscillationPresetIndex({ oscillation_enabled: "false", oscillation_span: 0 }, p), 0);
+  assert.equal(inferOscillationPresetIndex({ oscillation_enabled: true }, p), 0);
+});
+
+test("oscillationIsEnabled", () => {
+  assert.equal(oscillationIsEnabled({ oscillation_enabled: false }), false);
+  assert.equal(oscillationIsEnabled({ oscillation_enabled: "false", oscillation_span: 0 }), false);
+  assert.equal(oscillationIsEnabled({ oscillation_span: 0 }), false);
+  assert.equal(oscillationIsEnabled({ oscillation_enabled: true, oscillation_span: 45 }), true);
+  assert.equal(oscillationIsEnabled({ oscillating: false }), false);
+  assert.equal(oscillationIsEnabled({ oscillating: true }), true);
+});
+
+test("oscillationDisplayFromSelect matches libdyson select entity", () => {
+  const p = [0, 45, 90, 180, 350];
+  assert.equal(oscillationDisplayFromSelect(null, p), null);
+  assert.equal(oscillationDisplayFromSelect({ state: "45°", attributes: {} }, p), null);
+
+  const optionsOnlyState = {
+    state: "45°",
+    attributes: { options: ["45°", "90°", "180°", "350°", "Breeze", "Custom"] },
+  };
+  assert.equal(oscillationDisplayFromSelect(optionsOnlyState, p).label, "OFF");
+  assert.equal(
+    oscillationDisplayFromSelect(optionsOnlyState, p, { oscillating: false, oscillation_span: 0 }).label,
+    "OFF",
+  );
+
+  const offOnDevice = {
+    state: "45°",
+    attributes: {
+      oscillation_enabled: false,
+      oscillation_mode: "45°",
+      oscillation_span: 45,
+    },
+  };
+  const offDisp = oscillationDisplayFromSelect(offOnDevice, p);
+  assert.equal(offDisp.label, "OFF");
+  assert.equal(offDisp.engaged, false);
+  assert.equal(offDisp.presetIndex, 0);
+
+  const on45 = {
+    state: "45°",
+    attributes: {
+      oscillation_enabled: true,
+      oscillation_mode: "45°",
+      oscillation_span: 45,
+    },
+  };
+  const onDisp = oscillationDisplayFromSelect(on45, p);
+  assert.equal(onDisp.label, "45°");
+  assert.equal(onDisp.engaged, true);
+  assert.equal(onDisp.presetIndex, 1);
+
+  const modeOnlyOff = {
+    state: "45°",
+    attributes: {
+      oscillation_mode: "45°",
+      oscillation_span: 0,
+    },
+  };
+  const modeOff = oscillationDisplayFromSelect(modeOnlyOff, p);
+  assert.equal(modeOff.label, "OFF");
 });
 
 test("nextOscillationIndex wraps", () => {

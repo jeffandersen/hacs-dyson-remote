@@ -82,9 +82,39 @@ function oscillationPresetLabel(degrees) {
   return `${degrees}°`;
 }
 
+/**
+ * Normalizes fan/select oscillation state (booleans, strings, span, HA fan.oscillating).
+ */
+function oscillationIsEnabled(attrs) {
+  if (!attrs || typeof attrs !== "object") return false;
+  if (attrs.oscillating === false) return false;
+  if (attrs.oscillating === true) return true;
+
+  const v = attrs.oscillation_enabled;
+  if (v === false || v === 0) return false;
+  if (v === true || v === 1) return true;
+  if (typeof v === "string") {
+    const s = v.toLowerCase().trim();
+    if (s === "false" || s === "off" || s === "0") return false;
+    if (s === "true" || s === "on" || s === "1") return true;
+  }
+
+  const span = Number(attrs.oscillation_span);
+  if (Number.isFinite(span) && span > 0) return true;
+  if (Number.isFinite(span) && span <= 0) return false;
+
+  const al = typeof attrs.angle_low === "number" ? attrs.angle_low : attrs.oscillation_angle_low;
+  const ah = typeof attrs.angle_high === "number" ? attrs.angle_high : attrs.oscillation_angle_high;
+  if (typeof al === "number" && typeof ah === "number" && Number.isFinite(al) && Number.isFinite(ah)) {
+    if (Math.abs(ah - al) > 1) return true;
+  }
+
+  return false;
+}
+
 function inferOscillationPresetIndex(attrs, presets) {
   if (!presets || !presets.length) return 0;
-  if (!attrs?.oscillation_enabled) return 0;
+  if (!oscillationIsEnabled(attrs)) return 0;
   const spanCandidates = [
     attrs.oscillation_span,
     attrs.oscillation_angle,
@@ -106,7 +136,60 @@ function inferOscillationPresetIndex(attrs, presets) {
     }
   }
   if (bestD <= 45) return bestI;
-  return 1;
+  return 0;
+}
+
+function oscillationSelectLooksLikePreset(selectState) {
+  const a = selectState?.attributes;
+  if (!a || typeof a !== "object") return false;
+  if (
+    Object.hasOwn(a, "oscillation_enabled") ||
+    Object.hasOwn(a, "oscillation_span") ||
+    Object.hasOwn(a, "oscillation_mode")
+  ) {
+    return true;
+  }
+  const opts = a.options;
+  if (!Array.isArray(opts)) return false;
+  return opts.some(
+    (o) =>
+      typeof o === "string" &&
+      ((/\d/.test(o) && /°|deg(ree)?s?\b/i.test(o)) || /breeze|custom/i.test(o)),
+  );
+}
+
+/** Prefer select oscillation keys when present; otherwise fall back to fan (partial select attrs in editor/preview). */
+function oscillationMergeForEnabled(selectAttrs, fanAttrs) {
+  const s = selectAttrs && typeof selectAttrs === "object" ? selectAttrs : {};
+  const f = fanAttrs && typeof fanAttrs === "object" ? fanAttrs : {};
+  const out = {};
+  if (Object.hasOwn(s, "oscillating")) out.oscillating = s.oscillating;
+  else if (Object.hasOwn(f, "oscillating")) out.oscillating = f.oscillating;
+
+  if (Object.hasOwn(s, "oscillation_enabled")) out.oscillation_enabled = s.oscillation_enabled;
+  else if (Object.hasOwn(f, "oscillation_enabled")) out.oscillation_enabled = f.oscillation_enabled;
+
+  if (Object.hasOwn(s, "oscillation_span")) out.oscillation_span = s.oscillation_span;
+  else if (Object.hasOwn(f, "oscillation_span")) out.oscillation_span = f.oscillation_span;
+
+  const alS = s.oscillation_angle_low;
+  const ahS = s.oscillation_angle_high;
+  if (typeof alS === "number" && Number.isFinite(alS)) out.oscillation_angle_low = alS;
+  else if (typeof f.angle_low === "number" && Number.isFinite(f.angle_low)) out.angle_low = f.angle_low;
+  else if (typeof f.oscillation_angle_low === "number" && Number.isFinite(f.oscillation_angle_low)) {
+    out.oscillation_angle_low = f.oscillation_angle_low;
+  }
+
+  if (typeof ahS === "number" && Number.isFinite(ahS)) out.oscillation_angle_high = ahS;
+  else if (typeof f.angle_high === "number" && Number.isFinite(f.angle_high)) out.angle_high = f.angle_high;
+  else if (typeof f.oscillation_angle_high === "number" && Number.isFinite(f.oscillation_angle_high)) {
+    out.oscillation_angle_high = f.oscillation_angle_high;
+  }
+
+  if (Object.hasOwn(s, "oscillation_angle")) out.oscillation_angle = s.oscillation_angle;
+  else if (Object.hasOwn(f, "oscillation_angle")) out.oscillation_angle = f.oscillation_angle;
+
+  return out;
 }
 
 function nextOscillationIndex(currentIndex, direction, len) {
@@ -115,6 +198,66 @@ function nextOscillationIndex(currentIndex, direction, len) {
   if (i < 0) i = n - 1;
   if (i >= n) i = 0;
   return i;
+}
+
+/**
+ * libdyson `select.*_oscillation` carries `oscillation_enabled` / `oscillation_mode` that track
+ * the physical device and Dyson app; `fan` attributes are often wrong or delayed.
+ * When the select only has `options` + state (no oscillation_* keys yet), we still treat it as the
+ * oscillation control if options look like angle presets, and merge fan attrs to decide enabled.
+ * Returns null if this does not look like an oscillation select (use fan attrs only).
+ */
+function oscillationDisplayFromSelect(selectState, presets, fanAttrs = null) {
+  if (!selectState || !presets?.length) return null;
+  const a = selectState.attributes || {};
+  if (!oscillationSelectLooksLikePreset(selectState)) return null;
+
+  const merged = oscillationMergeForEnabled(a, fanAttrs);
+  if (!oscillationIsEnabled(merged)) {
+    return { label: "OFF", engaged: false, presetIndex: 0 };
+  }
+
+  const attrsForInfer = () => ({
+    oscillation_enabled: true,
+    oscillation_span: a.oscillation_span,
+    oscillation_angle: a.oscillation_angle,
+    angle_low: typeof a.oscillation_angle_low === "number" ? a.oscillation_angle_low : undefined,
+    angle_high: typeof a.oscillation_angle_high === "number" ? a.oscillation_angle_high : undefined,
+  });
+
+  const modeStr =
+    typeof a.oscillation_mode === "string"
+      ? a.oscillation_mode
+      : typeof selectState.state === "string"
+        ? selectState.state
+        : "";
+
+  const engaged = oscillationIsEnabled(merged);
+
+  const parsedDeg = parseInt(String(modeStr).replace(/[^\d]/g, ""), 10);
+  if (Number.isFinite(parsedDeg) && presets.includes(parsedDeg)) {
+    const idx = presets.indexOf(parsedDeg);
+    return { label: oscillationPresetLabel(parsedDeg), engaged, presetIndex: idx };
+  }
+
+  if (/custom|breeze/i.test(String(modeStr))) {
+    const oi = inferOscillationPresetIndex(attrsForInfer(), presets);
+    const deg = presets[oi] ?? 0;
+    return {
+      label: deg === 0 ? String(modeStr) : oscillationPresetLabel(deg),
+      engaged,
+      presetIndex: oi,
+    };
+  }
+
+  if (modeStr) {
+    const oi = inferOscillationPresetIndex({ ...attrsForInfer(), oscillation_enabled: true }, presets);
+    return { label: modeStr, engaged, presetIndex: oi };
+  }
+
+  const oi = inferOscillationPresetIndex({ ...attrsForInfer(), oscillation_enabled: true }, presets);
+  const deg = presets[oi] ?? 0;
+  return { label: oscillationPresetLabel(deg), engaged, presetIndex: oi };
 }
 
 function formatTargetTemperature(attrs, temperatureUnit) {
@@ -238,7 +381,7 @@ function isAirflowControlEngaged(st, attrs) {
   return false;
 }
 
-const DYSON_REMOTE_BUILD = "2026.03.23.11";
+const DYSON_REMOTE_BUILD = "2026.03.23.15";
 
 function entityState(hass, entityId) {
   return hass?.states?.[entityId] || null;
@@ -282,6 +425,53 @@ function relatedFanEntityId(hass, climateEntityId) {
   const objectId = climateEntityId.slice(idx + 1);
   const candidate = `fan.${objectId}`;
   if (hass?.states?.[candidate]) return candidate;
+  return null;
+}
+
+function fanEntityObjectId(fanEntityId) {
+  if (!fanEntityId || typeof fanEntityId !== "string") return "";
+  const idx = fanEntityId.indexOf(".");
+  return idx >= 0 ? fanEntityId.slice(idx + 1) : "";
+}
+
+/**
+ * libdyson / HA Dyson often exposes angle presets on `select.<device_id>_oscillation`
+ * (e.g. 45°, 90°, …). Driving that entity updates the device; fan.oscillate alone may not.
+ */
+function resolvedOscillationSelectEntityId(hass, fanEntityId, configuredId) {
+  const trimmed = typeof configuredId === "string" ? configuredId.trim() : "";
+  if (trimmed && hass?.states?.[trimmed] && trimmed.startsWith("select.")) {
+    return trimmed;
+  }
+  const oid = fanEntityObjectId(fanEntityId);
+  if (!oid) return null;
+  const candidate = `select.${oid}_oscillation`;
+  if (hass?.states?.[candidate]) return candidate;
+
+  const prefix = `select.${oid}_`;
+  const ids = Object.keys(hass?.states || {});
+  for (const id of ids) {
+    if (!id.startsWith(prefix) || !id.includes("oscillation")) continue;
+    const st = hass.states[id];
+    if (oscillationSelectLooksLikePreset(st)) return id;
+  }
+  for (const id of ids) {
+    if (!id.startsWith("select.")) continue;
+    if (!id.includes(oid) || !id.toLowerCase().includes("oscillation")) continue;
+    const st = hass.states[id];
+    if (oscillationSelectLooksLikePreset(st)) return id;
+  }
+  return null;
+}
+
+/** Map numeric preset (e.g. 45) to the integration's option label (e.g. "45°"). */
+function matchOscillationSelectOption(options, degrees) {
+  if (!degrees || degrees <= 0 || !Array.isArray(options)) return null;
+  for (const opt of options) {
+    if (typeof opt !== "string") continue;
+    const n = parseInt(opt.replace(/[^\d]/g, ""), 10);
+    if (Number.isFinite(n) && n === degrees) return opt;
+  }
   return null;
 }
 
@@ -434,6 +624,8 @@ class DysonRemoteCard extends HTMLElement {
       mushroom_shell: config.mushroom_shell !== false,
       oscillation_presets: normalizeOscillationPresets(config.oscillation_presets),
       title: typeof config.title === "string" ? config.title : "",
+      oscillation_select_entity:
+        typeof config.oscillation_select_entity === "string" ? config.oscillation_select_entity.trim() : "",
     };
     this._renderStatic();
     this._updateDynamic();
@@ -509,10 +701,30 @@ class DysonRemoteCard extends HTMLElement {
   }
 
   async _applyOscillationPreset(hass, domain, entityId, degrees) {
+    const selectId = resolvedOscillationSelectEntityId(
+      hass,
+      entityId,
+      this._config.oscillation_select_entity,
+    );
+
     if (degrees === 0) {
       await hass.callService(domain, "oscillate", { entity_id: entityId, oscillating: false });
       return;
     }
+
+    if (selectId && hass?.services?.select?.select_option) {
+      const options = hass.states?.[selectId]?.attributes?.options;
+      const option = matchOscillationSelectOption(options, degrees);
+      if (option) {
+        try {
+          await hass.callService("select", "select_option", { entity_id: selectId, option });
+          return;
+        } catch (err) {
+          console.warn("Dyson Remote: select.select_option for oscillation failed", err);
+        }
+      }
+    }
+
     if (hass.services?.dyson?.set_angle) {
       const half = Math.min(175, Math.round(degrees / 2));
       try {
@@ -1038,7 +1250,7 @@ class DysonRemoteCard extends HTMLElement {
    * Drop optimistic overlays only when real entity state matches what we asked for,
    * so the UI does not snap back to stale values before HA catches up.
    */
-  _reconcileOptimisticState(st, climateEntityId, humidifierEntityId) {
+  _reconcileOptimisticState(st, climateEntityId, humidifierEntityId, fanEntityId) {
     if (!this._optimisticAttrs || !this._optimisticExpected) return;
 
     const realFan = st?.attributes || {};
@@ -1057,7 +1269,11 @@ class DysonRemoteCard extends HTMLElement {
     };
 
     if (this._optimisticOscPresetIndex != null && presets.length) {
-      const idx = inferOscillationPresetIndex(realFan, presets);
+      const fid = fanEntityId || this._config.entity;
+      const selId = resolvedOscillationSelectEntityId(this._hass, fid, this._config.oscillation_select_entity);
+      const selectSt = selId ? this._hass?.states?.[selId] : null;
+      const fromSel = oscillationDisplayFromSelect(selectSt, presets, realFan);
+      const idx = fromSel != null ? fromSel.presetIndex : inferOscillationPresetIndex(realFan, presets);
       if (idx === this._optimisticOscPresetIndex) {
         del("oscillation_enabled");
         del("oscillation_span");
@@ -1144,8 +1360,9 @@ class DysonRemoteCard extends HTMLElement {
     if (!this._rootEl || !this._hass) return;
     const { fanEntityId, climateEntityId, humidifierEntityId } = resolveEntityPair(this._hass, this._config.entity);
     const st = fanEntityId ? entityState(this._hass, fanEntityId) : entityState(this._hass, this._config.entity);
-    this._reconcileOptimisticState(st, climateEntityId, humidifierEntityId);
-    const attrs = { ...(st?.attributes || {}), ...(this._optimisticAttrs || {}) };
+    this._reconcileOptimisticState(st, climateEntityId, humidifierEntityId, fanEntityId);
+    const realFanAttrs = st?.attributes || {};
+    const attrs = { ...realFanAttrs, ...(this._optimisticAttrs || {}) };
     const climateAttrs = climateEntityId ? this._hass?.states?.[climateEntityId]?.attributes || {} : {};
     const humidifierAttrs = humidifierEntityId ? this._hass?.states?.[humidifierEntityId]?.attributes || {} : {};
     const thermalAttrs = mergedThermalAttrs(attrs, climateAttrs);
@@ -1230,12 +1447,41 @@ class DysonRemoteCard extends HTMLElement {
     }
 
     const presets = this._config.oscillation_presets || normalizeOscillationPresets(null);
+    const oscillationFanId = fanEntityId || this._config.entity;
+    const oscSelectId = resolvedOscillationSelectEntityId(
+      this._hass,
+      oscillationFanId,
+      this._config.oscillation_select_entity,
+    );
+    const oscSelectSt = oscSelectId ? this._hass?.states?.[oscSelectId] : null;
+    const oscFromSelect = oscillationDisplayFromSelect(oscSelectSt, presets, realFanAttrs);
+
+    const optOsc = this._optimisticAttrs;
+    const oscOptimisticLabel =
+      optOsc &&
+      (optOsc.oscillation_span !== undefined || Object.hasOwn(optOsc, "oscillation_enabled"))
+        ? !oscillationIsEnabled(optOsc)
+          ? { label: "OFF", engaged: false }
+          : {
+              label: oscillationPresetLabel(Number(optOsc.oscillation_span) || 0),
+              engaged: oscillationIsEnabled(optOsc),
+            }
+        : null;
+
     const oscMid = this._rootEl.querySelector('[data-part="osc-mid"]');
     if (oscMid) {
-      const oi = inferOscillationPresetIndex(attrs, presets);
-      const deg = presets[oi] ?? 0;
-      oscMid.textContent = oscillationPresetLabel(deg);
-      oscMid.classList.toggle("muted", deg === 0);
+      if (oscFromSelect) {
+        oscMid.textContent = oscFromSelect.label;
+        oscMid.classList.toggle("muted", oscFromSelect.label === "OFF" || oscFromSelect.label === "—");
+      } else if (oscOptimisticLabel) {
+        oscMid.textContent = oscOptimisticLabel.label;
+        oscMid.classList.toggle("muted", oscOptimisticLabel.label === "OFF" || oscOptimisticLabel.label === "—");
+      } else {
+        const oi = inferOscillationPresetIndex(attrs, presets);
+        const deg = presets[oi] ?? 0;
+        oscMid.textContent = oscillationPresetLabel(deg);
+        oscMid.classList.toggle("muted", deg === 0);
+      }
     }
 
     this._toggleEngaged('button[data-action="power"]', entityIsPowered(st, attrs));
@@ -1246,7 +1492,14 @@ class DysonRemoteCard extends HTMLElement {
       '[data-stepper="thermal"]',
       humidifierMode ? isHumidityEnabled({ ...attrs, ...climateAttrs, ...humidifierAttrs }) : isHeatActive(attrs),
     );
-    this._toggleEngaged('[data-stepper="oscillation"]', attrs.oscillation_enabled === true);
+    this._toggleEngaged(
+      '[data-stepper="oscillation"]',
+      oscFromSelect
+        ? oscFromSelect.engaged
+        : oscOptimisticLabel
+          ? oscOptimisticLabel.engaged
+          : oscillationIsEnabled(attrs),
+    );
     this._toggleEngaged('button[data-action="night"]', isNightModeActive(attrs));
     this._toggleEngaged('button[data-action="direction"]', directionValue !== "forward");
   }
@@ -1390,7 +1643,11 @@ class DysonRemoteCard extends HTMLElement {
         case "osc_plus": {
           const dir = action === "osc_minus" ? -1 : 1;
           const presets = this._config.oscillation_presets || normalizeOscillationPresets(null);
-          const idx = inferOscillationPresetIndex(attrs, presets);
+          const oscSelId = resolvedOscillationSelectEntityId(hass, entityId, this._config.oscillation_select_entity);
+          const oscSelSt = oscSelId ? hass.states[oscSelId] : null;
+          const oscFromSelect = oscillationDisplayFromSelect(oscSelSt, presets, attrs);
+          const idx =
+            oscFromSelect != null ? oscFromSelect.presetIndex : inferOscillationPresetIndex(attrs, presets);
           const nextIdx = nextOscillationIndex(idx, dir, presets.length);
           const nextDeg = presets[nextIdx];
           this._applyOptimisticPatch(
@@ -1463,6 +1720,14 @@ class DysonRemoteCardEditor extends HTMLElement {
         },
       },
       {
+        name: "oscillation_select_entity",
+        selector: {
+          entity: {
+            domain: ["select"],
+          },
+        },
+      },
+      {
         name: "show_temperature_header",
         selector: { boolean: {} },
       },
@@ -1477,6 +1742,7 @@ class DysonRemoteCardEditor extends HTMLElement {
     this._config = {
       entity: "",
       title: "",
+      oscillation_select_entity: "",
       show_temperature_header: true,
       mushroom_shell: true,
       oscillation_presets: [0, 45, 90, 180, 350],
@@ -1500,6 +1766,10 @@ class DysonRemoteCardEditor extends HTMLElement {
     const trimmedTitle = typeof normalized.title === "string" ? normalized.title.trim() : "";
     if (trimmedTitle) normalized.title = trimmedTitle;
     else delete normalized.title;
+    const trimmedOscSel =
+      typeof normalized.oscillation_select_entity === "string" ? normalized.oscillation_select_entity.trim() : "";
+    if (trimmedOscSel) normalized.oscillation_select_entity = trimmedOscSel;
+    else delete normalized.oscillation_select_entity;
     this.dispatchEvent(
       new CustomEvent("config-changed", {
         detail: { config: normalized },
@@ -1600,6 +1870,7 @@ class DysonRemoteCardEditor extends HTMLElement {
       form.schema = DysonRemoteCardEditor._schema;
       form.computeLabel = (schema) => {
         if (schema.name === "entity") return "Entity";
+        if (schema.name === "oscillation_select_entity") return "Oscillation select (optional)";
         if (schema.name === "show_temperature_header") return "Show temperature header";
         if (schema.name === "mushroom_shell") return "Use mushroom-style shell";
         return schema.name;

@@ -82,9 +82,39 @@ export function oscillationPresetLabel(degrees) {
   return `${degrees}°`;
 }
 
+/**
+ * Normalizes fan/select oscillation state (booleans, strings, span, HA fan.oscillating).
+ */
+export function oscillationIsEnabled(attrs) {
+  if (!attrs || typeof attrs !== "object") return false;
+  if (attrs.oscillating === false) return false;
+  if (attrs.oscillating === true) return true;
+
+  const v = attrs.oscillation_enabled;
+  if (v === false || v === 0) return false;
+  if (v === true || v === 1) return true;
+  if (typeof v === "string") {
+    const s = v.toLowerCase().trim();
+    if (s === "false" || s === "off" || s === "0") return false;
+    if (s === "true" || s === "on" || s === "1") return true;
+  }
+
+  const span = Number(attrs.oscillation_span);
+  if (Number.isFinite(span) && span > 0) return true;
+  if (Number.isFinite(span) && span <= 0) return false;
+
+  const al = typeof attrs.angle_low === "number" ? attrs.angle_low : attrs.oscillation_angle_low;
+  const ah = typeof attrs.angle_high === "number" ? attrs.angle_high : attrs.oscillation_angle_high;
+  if (typeof al === "number" && typeof ah === "number" && Number.isFinite(al) && Number.isFinite(ah)) {
+    if (Math.abs(ah - al) > 1) return true;
+  }
+
+  return false;
+}
+
 export function inferOscillationPresetIndex(attrs, presets) {
   if (!presets || !presets.length) return 0;
-  if (!attrs?.oscillation_enabled) return 0;
+  if (!oscillationIsEnabled(attrs)) return 0;
   const spanCandidates = [
     attrs.oscillation_span,
     attrs.oscillation_angle,
@@ -106,7 +136,60 @@ export function inferOscillationPresetIndex(attrs, presets) {
     }
   }
   if (bestD <= 45) return bestI;
-  return 1;
+  return 0;
+}
+
+export function oscillationSelectLooksLikePreset(selectState) {
+  const a = selectState?.attributes;
+  if (!a || typeof a !== "object") return false;
+  if (
+    Object.hasOwn(a, "oscillation_enabled") ||
+    Object.hasOwn(a, "oscillation_span") ||
+    Object.hasOwn(a, "oscillation_mode")
+  ) {
+    return true;
+  }
+  const opts = a.options;
+  if (!Array.isArray(opts)) return false;
+  return opts.some(
+    (o) =>
+      typeof o === "string" &&
+      ((/\d/.test(o) && /°|deg(ree)?s?\b/i.test(o)) || /breeze|custom/i.test(o)),
+  );
+}
+
+/** Prefer select oscillation keys when present; otherwise fall back to fan (partial select attrs in editor/preview). */
+export function oscillationMergeForEnabled(selectAttrs, fanAttrs) {
+  const s = selectAttrs && typeof selectAttrs === "object" ? selectAttrs : {};
+  const f = fanAttrs && typeof fanAttrs === "object" ? fanAttrs : {};
+  const out = {};
+  if (Object.hasOwn(s, "oscillating")) out.oscillating = s.oscillating;
+  else if (Object.hasOwn(f, "oscillating")) out.oscillating = f.oscillating;
+
+  if (Object.hasOwn(s, "oscillation_enabled")) out.oscillation_enabled = s.oscillation_enabled;
+  else if (Object.hasOwn(f, "oscillation_enabled")) out.oscillation_enabled = f.oscillation_enabled;
+
+  if (Object.hasOwn(s, "oscillation_span")) out.oscillation_span = s.oscillation_span;
+  else if (Object.hasOwn(f, "oscillation_span")) out.oscillation_span = f.oscillation_span;
+
+  const alS = s.oscillation_angle_low;
+  const ahS = s.oscillation_angle_high;
+  if (typeof alS === "number" && Number.isFinite(alS)) out.oscillation_angle_low = alS;
+  else if (typeof f.angle_low === "number" && Number.isFinite(f.angle_low)) out.angle_low = f.angle_low;
+  else if (typeof f.oscillation_angle_low === "number" && Number.isFinite(f.oscillation_angle_low)) {
+    out.oscillation_angle_low = f.oscillation_angle_low;
+  }
+
+  if (typeof ahS === "number" && Number.isFinite(ahS)) out.oscillation_angle_high = ahS;
+  else if (typeof f.angle_high === "number" && Number.isFinite(f.angle_high)) out.angle_high = f.angle_high;
+  else if (typeof f.oscillation_angle_high === "number" && Number.isFinite(f.oscillation_angle_high)) {
+    out.oscillation_angle_high = f.oscillation_angle_high;
+  }
+
+  if (Object.hasOwn(s, "oscillation_angle")) out.oscillation_angle = s.oscillation_angle;
+  else if (Object.hasOwn(f, "oscillation_angle")) out.oscillation_angle = f.oscillation_angle;
+
+  return out;
 }
 
 export function nextOscillationIndex(currentIndex, direction, len) {
@@ -115,6 +198,66 @@ export function nextOscillationIndex(currentIndex, direction, len) {
   if (i < 0) i = n - 1;
   if (i >= n) i = 0;
   return i;
+}
+
+/**
+ * libdyson `select.*_oscillation` carries `oscillation_enabled` / `oscillation_mode` that track
+ * the physical device and Dyson app; `fan` attributes are often wrong or delayed.
+ * When the select only has `options` + state (no oscillation_* keys yet), we still treat it as the
+ * oscillation control if options look like angle presets, and merge fan attrs to decide enabled.
+ * Returns null if this does not look like an oscillation select (use fan attrs only).
+ */
+export function oscillationDisplayFromSelect(selectState, presets, fanAttrs = null) {
+  if (!selectState || !presets?.length) return null;
+  const a = selectState.attributes || {};
+  if (!oscillationSelectLooksLikePreset(selectState)) return null;
+
+  const merged = oscillationMergeForEnabled(a, fanAttrs);
+  if (!oscillationIsEnabled(merged)) {
+    return { label: "OFF", engaged: false, presetIndex: 0 };
+  }
+
+  const attrsForInfer = () => ({
+    oscillation_enabled: true,
+    oscillation_span: a.oscillation_span,
+    oscillation_angle: a.oscillation_angle,
+    angle_low: typeof a.oscillation_angle_low === "number" ? a.oscillation_angle_low : undefined,
+    angle_high: typeof a.oscillation_angle_high === "number" ? a.oscillation_angle_high : undefined,
+  });
+
+  const modeStr =
+    typeof a.oscillation_mode === "string"
+      ? a.oscillation_mode
+      : typeof selectState.state === "string"
+        ? selectState.state
+        : "";
+
+  const engaged = oscillationIsEnabled(merged);
+
+  const parsedDeg = parseInt(String(modeStr).replace(/[^\d]/g, ""), 10);
+  if (Number.isFinite(parsedDeg) && presets.includes(parsedDeg)) {
+    const idx = presets.indexOf(parsedDeg);
+    return { label: oscillationPresetLabel(parsedDeg), engaged, presetIndex: idx };
+  }
+
+  if (/custom|breeze/i.test(String(modeStr))) {
+    const oi = inferOscillationPresetIndex(attrsForInfer(), presets);
+    const deg = presets[oi] ?? 0;
+    return {
+      label: deg === 0 ? String(modeStr) : oscillationPresetLabel(deg),
+      engaged,
+      presetIndex: oi,
+    };
+  }
+
+  if (modeStr) {
+    const oi = inferOscillationPresetIndex({ ...attrsForInfer(), oscillation_enabled: true }, presets);
+    return { label: modeStr, engaged, presetIndex: oi };
+  }
+
+  const oi = inferOscillationPresetIndex({ ...attrsForInfer(), oscillation_enabled: true }, presets);
+  const deg = presets[oi] ?? 0;
+  return { label: oscillationPresetLabel(deg), engaged, presetIndex: oi };
 }
 
 export function formatTargetTemperature(attrs, temperatureUnit) {
