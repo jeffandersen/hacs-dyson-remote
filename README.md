@@ -62,7 +62,6 @@ show_air_quality_header: true
 # hide_air_quality_category: true
 # hide_air_quality_pollutant: true
 # hide_air_quality_bar: true
-mushroom_shell: true
 oscillation_presets: [0, 45, 90, 180, 350]
 # Optional: only if auto-discovery cannot find your oscillation select (rare)
 oscillation_select_entity: select.dyson_zz7_ca_mja1790a_oscillation
@@ -96,11 +95,6 @@ This card now includes a visual config editor, so Home Assistant should no longe
 | Night mode | Toggles night mode when supported |
 
 Note: Dyson integrations differ. If your setup uses different services or entity types, use scripts/automations as adapters.
-
-## Mushroom-style look
-
-By default, the card uses a Mushroom-style outer shell via Home Assistant theme variables.  
-Set `mushroom_shell: false` for a full-bleed black panel.
 
 ## Troubleshooting
 

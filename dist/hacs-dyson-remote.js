@@ -440,10 +440,6 @@ function buildDysonRemoteCardEditorSchema(data) {
       selector: { boolean: {} },
     },
     ...sub,
-    {
-      name: "mushroom_shell",
-      selector: { boolean: {} },
-    },
   ];
 }
 
@@ -1483,6 +1479,13 @@ function parseConfigHumidityStep(v) {
   return undefined;
 }
 
+/** Optional title alignment. */
+function normalizeTitleAlignment(v) {
+  const s = typeof v === "string" ? v.trim().toLowerCase() : "";
+  if (s === "center" || s === "right") return s;
+  return "left";
+}
+
 /** HA rejects unknown `climate.set_humidity` keys; only send `humidity_auto` if the service schema includes it. */
 function climateSetHumiditySupportsHumidityAuto(hass) {
   const fields = hass?.services?.climate?.set_humidity?.fields;
@@ -1766,9 +1769,9 @@ class DysonRemoteCard extends HTMLElement {
         "hide_air_quality_pollutant",
       ),
       show_air_quality_bar: airSubsectionEnabled(config, "show_air_quality_bar", "hide_air_quality_bar"),
-      mushroom_shell: config.mushroom_shell !== false,
       oscillation_presets: normalizeOscillationPresets(config.oscillation_presets),
       title: typeof config.title === "string" ? config.title : "",
+      title_alignment: normalizeTitleAlignment(config.title_alignment),
       oscillation_select_entity:
         typeof config.oscillation_select_entity === "string" ? config.oscillation_select_entity.trim() : "",
       climate_entity: typeof config.climate_entity === "string" ? config.climate_entity.trim() : "",
@@ -1789,7 +1792,7 @@ class DysonRemoteCard extends HTMLElement {
   }
 
   static getStubConfig() {
-    return { entity: "fan.dyson", mushroom_shell: true };
+    return { entity: "fan.dyson" };
   }
 
   static getConfigElement() {
@@ -1919,8 +1922,6 @@ class DysonRemoteCard extends HTMLElement {
   }
 
   _renderStatic() {
-    const shellFlat = !this._config.mushroom_shell;
-
     const style = document.createElement("style");
     style.textContent = `
       :host {
@@ -1954,14 +1955,6 @@ class DysonRemoteCard extends HTMLElement {
         padding: 0;
         box-sizing: border-box;
       }
-      .shell.shell--flat {
-        background: transparent;
-        padding: 0;
-        border-radius: 0;
-        border: none;
-        box-shadow: none;
-        overflow: visible;
-      }
       .inner-remote {
         background: var(--drc-bg);
         border-radius: inherit;
@@ -1971,12 +1964,14 @@ class DysonRemoteCard extends HTMLElement {
       }
       .title {
         display: block;
-        font-size: 1.25rem;
-        line-height: 1.3;
-        letter-spacing: 0;
-        font-weight: 500;
+        font: inherit;
+        font-size: inherit;
+        line-height: 1.4;
+        letter-spacing: inherit;
+        font-weight: inherit;
         color: var(--primary-text-color, var(--drc-text));
-        margin: 0 0 6px;
+        margin: 0;
+        padding: 4px 2px 12px;
       }
       .title[hidden] { display: none !important; }
       .header {
@@ -2428,7 +2423,7 @@ class DysonRemoteCard extends HTMLElement {
     `;
 
     const shell = document.createElement("ha-card");
-    shell.className = "shell" + (shellFlat ? " shell--flat" : "");
+    shell.className = "shell";
     shell.dataset.part = "shell";
 
     const inner = document.createElement("div");
@@ -2543,6 +2538,7 @@ class DysonRemoteCard extends HTMLElement {
     if (titleEl) {
       const initialTitle = typeof this._config.title === "string" ? this._config.title.trim() : "";
       titleEl.textContent = initialTitle;
+      titleEl.style.textAlign = normalizeTitleAlignment(this._config.title_alignment);
       titleEl.hidden = !initialTitle;
     }
 
@@ -2881,6 +2877,7 @@ class DysonRemoteCard extends HTMLElement {
     if (titleEl) {
       const title = typeof this._config.title === "string" ? this._config.title.trim() : "";
       titleEl.textContent = title;
+      titleEl.style.textAlign = normalizeTitleAlignment(this._config.title_alignment);
       titleEl.hidden = !title;
     }
 
@@ -3653,6 +3650,7 @@ class DysonRemoteCardEditor extends HTMLElement {
     this._config = {
       entity: "",
       title: "",
+      title_alignment: "left",
       oscillation_select_entity: "",
       climate_entity: "",
       humidity_auto_entity: "",
@@ -3661,7 +3659,6 @@ class DysonRemoteCardEditor extends HTMLElement {
       humidity_write: "auto",
       show_temperature_header: true,
       show_air_quality_header: false,
-      mushroom_shell: true,
       oscillation_presets: [0, 45, 90, 180, 350],
       ...config,
     };
@@ -3684,6 +3681,7 @@ class DysonRemoteCardEditor extends HTMLElement {
     const trimmedTitle = typeof normalized.title === "string" ? normalized.title.trim() : "";
     if (trimmedTitle) normalized.title = trimmedTitle;
     else delete normalized.title;
+    normalized.title_alignment = normalizeTitleAlignment(normalized.title_alignment);
     const trimmedOscSel =
       typeof normalized.oscillation_select_entity === "string" ? normalized.oscillation_select_entity.trim() : "";
     if (trimmedOscSel) normalized.oscillation_select_entity = trimmedOscSel;
@@ -3770,6 +3768,15 @@ class DysonRemoteCardEditor extends HTMLElement {
           background: var(--card-background-color);
           color: var(--primary-text-color);
         }
+        .field select {
+          width: 100%;
+          box-sizing: border-box;
+          padding: 8px 10px;
+          border-radius: 8px;
+          border: 1px solid var(--divider-color);
+          background: var(--card-background-color);
+          color: var(--primary-text-color);
+        }
         .fallback { display:grid; gap: 8px; }
         .fallback label { font-size: 13px; color: var(--secondary-text-color); }
         .fallback input[type="text"] {
@@ -3794,6 +3801,14 @@ class DysonRemoteCardEditor extends HTMLElement {
         <div class="field">
           <label for="titleInput">Title</label>
           <input id="titleInput" type="text" placeholder="Living Room" />
+        </div>
+        <div class="field">
+          <label for="titleAlignmentInput">Title alignment</label>
+          <select id="titleAlignmentInput">
+            <option value="left">Left</option>
+            <option value="center">Center</option>
+            <option value="right">Right</option>
+          </select>
         </div>
         ${hasForm ? `<${formTag} id="form"></${formTag}>` : `
           <div class="fallback">
@@ -3821,10 +3836,6 @@ class DysonRemoteCardEditor extends HTMLElement {
                 Show air quality bar
               </label>
             </div>
-            <label>
-              <input id="mushroomShellInput" type="checkbox" />
-              Use mushroom-style shell
-            </label>
             <div class="hint">Waiting for Home Assistant form components...</div>
           </div>
         `}
@@ -3832,9 +3843,17 @@ class DysonRemoteCardEditor extends HTMLElement {
     `;
 
     const titleInput = this.shadowRoot.getElementById("titleInput");
+    const titleAlignmentInput = this.shadowRoot.getElementById("titleAlignmentInput");
     titleInput.value = this._config.title || "";
-    const emitWithTitle = (next) => this._emitConfig({ ...next, title: titleInput.value });
+    titleAlignmentInput.value = normalizeTitleAlignment(this._config.title_alignment);
+    const emitWithTitle = (next) =>
+      this._emitConfig({
+        ...next,
+        title: titleInput.value,
+        title_alignment: normalizeTitleAlignment(titleAlignmentInput.value),
+      });
     titleInput.addEventListener("change", () => emitWithTitle(this._config));
+    titleAlignmentInput.addEventListener("change", () => emitWithTitle(this._config));
 
     if (hasForm) {
       const form = this.shadowRoot.getElementById("form");
@@ -3849,7 +3868,6 @@ class DysonRemoteCardEditor extends HTMLElement {
         show_temperature_header: this._config.show_temperature_header !== false,
         show_air_quality_header: this._config.show_air_quality_header === true,
         ...airSubsectionFormValues(this._config),
-        mushroom_shell: this._config.mushroom_shell !== false,
       };
       form.schema = DysonRemoteCardEditor._schemaFor(form.data);
       form.computeLabel = (schema) => {
@@ -3865,7 +3883,6 @@ class DysonRemoteCardEditor extends HTMLElement {
         if (schema.name === "show_air_quality_category") return "Show category";
         if (schema.name === "show_air_quality_pollutant") return "Show pollutant";
         if (schema.name === "show_air_quality_bar") return "Show air quality bar";
-        if (schema.name === "mushroom_shell") return "Use mushroom-style shell";
         return schema.name;
       };
       form.computeHelper = (schema) => {
@@ -3902,7 +3919,6 @@ class DysonRemoteCardEditor extends HTMLElement {
       const showAirQualityCategoryInput = this.shadowRoot.getElementById("showAirQualityCategoryInput");
       const showAirQualityPollutantInput = this.shadowRoot.getElementById("showAirQualityPollutantInput");
       const showAirQualityBarInput = this.shadowRoot.getElementById("showAirQualityBarInput");
-      const mushroomShellInput = this.shadowRoot.getElementById("mushroomShellInput");
       const aqSubOpts = this.shadowRoot.querySelector('[data-part="aq-sub-opts"]');
       entityInput.value = this._config.entity || "";
       showTemperatureHeaderInput.checked = Boolean(this._config.show_temperature_header);
@@ -3911,7 +3927,6 @@ class DysonRemoteCardEditor extends HTMLElement {
       showAirQualityCategoryInput.checked = subVals.show_air_quality_category;
       showAirQualityPollutantInput.checked = subVals.show_air_quality_pollutant;
       showAirQualityBarInput.checked = subVals.show_air_quality_bar;
-      mushroomShellInput.checked = Boolean(this._config.mushroom_shell);
       const syncAqSubVisibility = () => {
         if (aqSubOpts) aqSubOpts.hidden = !showAirQualityHeaderInput.checked;
       };
@@ -3925,7 +3940,6 @@ class DysonRemoteCardEditor extends HTMLElement {
           show_air_quality_category: Boolean(showAirQualityCategoryInput.checked),
           show_air_quality_pollutant: Boolean(showAirQualityPollutantInput.checked),
           show_air_quality_bar: Boolean(showAirQualityBarInput.checked),
-          mushroom_shell: Boolean(mushroomShellInput.checked),
         });
       };
       entityInput.addEventListener("change", emit);
@@ -3937,7 +3951,6 @@ class DysonRemoteCardEditor extends HTMLElement {
       showAirQualityCategoryInput.addEventListener("change", emit);
       showAirQualityPollutantInput.addEventListener("change", emit);
       showAirQualityBarInput.addEventListener("change", emit);
-      mushroomShellInput.addEventListener("change", emit);
     }
   }
 }

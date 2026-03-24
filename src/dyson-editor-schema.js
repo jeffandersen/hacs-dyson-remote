@@ -106,9 +106,5 @@ export function buildDysonRemoteCardEditorSchema(data) {
       selector: { boolean: {} },
     },
     ...sub,
-    {
-      name: "mushroom_shell",
-      selector: { boolean: {} },
-    },
   ];
 }
