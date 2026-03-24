@@ -8,6 +8,7 @@ const CLIMATE_ENTITY_ID = "climate.dyson_device";
 function createMockHass(overrides = {}) {
   const entityId = FAN_ENTITY_ID;
   const climateId = CLIMATE_ENTITY_ID;
+  const deviceId = "device-dyson-1";
   const states = {
     [entityId]: {
       state: "on",
@@ -48,11 +49,16 @@ function createMockHass(overrides = {}) {
   const calls = [];
   const hass = {
     states,
+    entities: {
+      [entityId]: { device_id: deviceId },
+      [climateId]: { device_id: deviceId },
+    },
     services: {
       fan: { turn_on: {}, turn_off: {}, set_percentage: {}, set_temperature: {}, oscillate: {}, set_preset_mode: {}, set_direction: {} },
       climate: { set_hvac_mode: {}, set_temperature: {}, set_humidity: {} },
       humidifier: { turn_on: {}, turn_off: {}, set_humidity: {}, set_mode: {} },
       dyson: { set_angle: {}, set_night_mode: {} },
+      hass_dyson: { set_sleep_timer: {}, cancel_sleep_timer: {} },
       select: { select_option: {} },
       switch: { turn_on: {}, turn_off: {} },
       number: { set_value: {} },
@@ -95,14 +101,47 @@ function createCardWithConfig(hass, config) {
 }
 
 describe("dyson-remote-card integration harness", () => {
-  test("footer row uses spacer before night so auto-flow centers night in column 2", () => {
+  test("footer row includes timer, night, direction controls", () => {
     const card = createCard(createMockHass());
     const grid = card.shadowRoot.querySelector(".grid");
     const cells = [...grid.children].filter((el) => el.classList?.contains("cell"));
-    const iSpacer = cells.findIndex((c) => c.classList.contains("cell--footer-spacer"));
+    const iTimer = cells.findIndex((c) => c.classList.contains("cell--footer-timer"));
     const iNight = cells.findIndex((c) => c.classList.contains("cell--footer-night"));
-    expect(iSpacer).toBeGreaterThanOrEqual(0);
-    expect(iNight).toBeGreaterThan(iSpacer);
+    const iDirection = cells.findIndex((c) => c.classList.contains("cell--footer-direction"));
+    expect(iTimer).toBeGreaterThanOrEqual(0);
+    expect(iNight).toBeGreaterThan(iTimer);
+    expect(iDirection).toBeGreaterThan(iNight);
+  });
+
+  test("timer button opens overlay and cancel calls hass_dyson.cancel_sleep_timer", async () => {
+    const hass = createMockHass();
+    const card = createCard(hass);
+    const timerBtn = card.shadowRoot.querySelector('button[data-action="timer"]');
+    timerBtn.click();
+    await nextTick();
+    const overlay = card.shadowRoot.querySelector('[data-part="timer-overlay"]');
+    expect(overlay.hidden).toBe(false);
+    const cancel = card.shadowRoot.querySelector('button[data-action="timer_cancel"]');
+    cancel.click();
+    await nextTick();
+    const call = hass.__calls.find((c) => c.domain === "hass_dyson" && c.service === "cancel_sleep_timer");
+    expect(call).toBeTruthy();
+    expect(call.data.device_id).toBe("device-dyson-1");
+  });
+
+  test("timer preset calls hass_dyson.set_sleep_timer and closes overlay", async () => {
+    const hass = createMockHass();
+    const card = createCard(hass);
+    card.shadowRoot.querySelector('button[data-action="timer"]').click();
+    await nextTick();
+    card.shadowRoot.querySelector('button[data-action="timer_set_120"]').click();
+    await nextTick();
+    const call = hass.__calls.find((c) => c.domain === "hass_dyson" && c.service === "set_sleep_timer");
+    expect(call).toBeTruthy();
+    expect(call.data.device_id).toBe("device-dyson-1");
+    expect(call.data.minutes).toBe(120);
+    const overlay = card.shadowRoot.querySelector('[data-part="timer-overlay"]');
+    expect(overlay.hidden).toBe(true);
   });
 
   test("stepper layout is vertical (+, readout, -)", () => {

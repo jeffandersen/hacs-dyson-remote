@@ -197,6 +197,45 @@ function toggledDirection(direction) {
   return normalizeDirection(direction) === "forward" ? "reverse" : "forward";
 }
 
+function sleepTimerMinutesFromAttrs(attrs) {
+  const v = attrs?.sleep_timer;
+  if (typeof v === "number" && Number.isFinite(v) && v > 0) {
+    /* hass-dyson commonly exposes seconds; guard small minute-like values too. */
+    return v > 600 ? Math.round(v / 60) : Math.round(v);
+  }
+  if (typeof v === "string" && v.trim()) {
+    const s = v.trim();
+    const mmss = s.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+    if (mmss) {
+      const h = Number(mmss[1] || 0);
+      const m = Number(mmss[2] || 0);
+      const sec = Number(mmss[3] || 0);
+      return h * 60 + m + (sec >= 30 ? 1 : 0);
+    }
+    const n = Number(s);
+    if (Number.isFinite(n) && n > 0) return n > 600 ? Math.round(n / 60) : Math.round(n);
+  }
+  return 0;
+}
+
+function formatSleepTimerLabel(minutes) {
+  if (!minutes || minutes <= 0) return "OFF";
+  if (minutes < 60) return `${minutes}m`;
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  return m ? `${h}h ${m}m` : `${h}h`;
+}
+
+function resolvedDeviceId(hass, entityId) {
+  if (!entityId || typeof entityId !== "string") return "";
+  const entities = hass?.entities;
+  const registryDeviceId = entities && typeof entities === "object" ? entities[entityId]?.device_id : null;
+  if (typeof registryDeviceId === "string" && registryDeviceId.trim()) return registryDeviceId.trim();
+  const stateDeviceId = hass?.states?.[entityId]?.attributes?.device_id;
+  if (typeof stateDeviceId === "string" && stateDeviceId.trim()) return stateDeviceId.trim();
+  return "";
+}
+
 function relatedClimateEntityId(hass, fanEntityId) {
   if (!fanEntityId || typeof fanEntityId !== "string") return null;
   const idx = fanEntityId.indexOf(".");
@@ -401,6 +440,7 @@ class DysonRemoteCard extends HTMLElement {
     this._optimisticOscPresetIndex = null;
     this._optimisticClimateHumidityAutoExpected = null;
     this._optimisticClearTimer = null;
+    this._timerOverlayOpen = false;
   }
 
   set hass(hass) {
@@ -579,6 +619,34 @@ class DysonRemoteCard extends HTMLElement {
     return false;
   }
 
+  async _setSleepTimer(hass, deviceId, minutes) {
+    if (!deviceId || !minutes || minutes <= 0) return false;
+    const candidates = [
+      ["hass_dyson", "set_sleep_timer"],
+      ["dyson", "set_sleep_timer"],
+    ];
+    for (const [domain, service] of candidates) {
+      if (!hass?.services?.[domain]?.[service]) continue;
+      await hass.callService(domain, service, { device_id: deviceId, minutes });
+      return true;
+    }
+    return false;
+  }
+
+  async _cancelSleepTimer(hass, deviceId) {
+    if (!deviceId) return false;
+    const candidates = [
+      ["hass_dyson", "cancel_sleep_timer"],
+      ["dyson", "cancel_sleep_timer"],
+    ];
+    for (const [domain, service] of candidates) {
+      if (!hass?.services?.[domain]?.[service]) continue;
+      await hass.callService(domain, service, { device_id: deviceId });
+      return true;
+    }
+    return false;
+  }
+
   _renderStatic() {
     const style = document.createElement("style");
     style.textContent = `
@@ -619,6 +687,7 @@ class DysonRemoteCard extends HTMLElement {
         color: var(--drc-text);
         padding: 14px 14px 16px;
         box-sizing: border-box;
+        position: relative;
       }
       .title {
         display: block;
@@ -866,6 +935,51 @@ class DysonRemoteCard extends HTMLElement {
         transition: background 0.18s ease, transform 0.08s ease;
       }
       .btn-circle:active { transform: scale(0.97); }
+      .timer-overlay {
+        position: absolute;
+        inset: 10px;
+        z-index: 7;
+        border-radius: 14px;
+        padding: 16px;
+        background: color-mix(in srgb, #000 86%, var(--ha-card-background, #1c1c1c));
+        border: 1px solid color-mix(in srgb, var(--divider-color, #666) 70%, transparent);
+        box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
+        display: grid;
+        grid-template-rows: auto 1fr auto;
+        gap: 12px;
+      }
+      .timer-overlay[hidden] {
+        display: none !important;
+      }
+      .timer-overlay__title {
+        text-align: center;
+        font-size: 1rem;
+        opacity: 0.95;
+      }
+      .timer-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 8px;
+      }
+      .timer-chip {
+        border: 1px solid color-mix(in srgb, var(--divider-color, #666) 70%, transparent);
+        border-radius: 999px;
+        background: color-mix(in srgb, var(--drc-surface-idle) 85%, #000);
+        color: var(--drc-text);
+        min-height: 34px;
+        padding: 0 10px;
+      }
+      .timer-chip:hover {
+        background: color-mix(in srgb, var(--drc-surface-on) 55%, #000);
+      }
+      .timer-actions {
+        display: flex;
+        justify-content: space-between;
+        gap: 10px;
+      }
+      .timer-actions .timer-chip {
+        flex: 1;
+      }
       .btn-pill {
         width: var(--drc-pill-w);
         height: var(--drc-pill-h);
@@ -1074,9 +1188,7 @@ class DysonRemoteCard extends HTMLElement {
         .cell--stepper-airflow {
           grid-row: auto;
         }
-        .cell--footer-spacer {
-          display: none;
-        }
+        .timer-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       }
     `;
 
@@ -1166,9 +1278,11 @@ class DysonRemoteCard extends HTMLElement {
           <div class="label">Airflow speed</div>
         </div>
 
-        <div class="cell cell--footer-spacer" aria-hidden="true">
-          <div class="btn-circle"></div>
-          <div class="label"> </div>
+        <div class="cell cell--footer-timer">
+          <button type="button" class="btn-circle" data-action="timer" aria-label="Timer">
+            <span class="icon-slot" data-ha-icon="mdi:timer-outline" data-ha-size="28"></span>
+          </button>
+          <div class="label" data-part="timer-label">Timer</div>
         </div>
         <div class="cell cell--footer-night">
           <button type="button" class="btn-circle" data-action="night" aria-label="Night mode">
@@ -1181,6 +1295,27 @@ class DysonRemoteCard extends HTMLElement {
             <span class="icon-slot" data-part="direction-icon" data-ha-icon="mdi:tray-arrow-up" data-ha-size="28"></span>
           </button>
           <div class="label">Airflow direction</div>
+        </div>
+      </div>
+      <div class="timer-overlay" data-part="timer-overlay" hidden>
+        <div class="timer-overlay__title">Set sleep timer</div>
+        <div class="timer-grid">
+          <button type="button" class="timer-chip" data-action="timer_set_15">15m</button>
+          <button type="button" class="timer-chip" data-action="timer_set_30">30m</button>
+          <button type="button" class="timer-chip" data-action="timer_set_45">45m</button>
+          <button type="button" class="timer-chip" data-action="timer_set_60">1h</button>
+          <button type="button" class="timer-chip" data-action="timer_set_120">2h</button>
+          <button type="button" class="timer-chip" data-action="timer_set_180">3h</button>
+          <button type="button" class="timer-chip" data-action="timer_set_240">4h</button>
+          <button type="button" class="timer-chip" data-action="timer_set_300">5h</button>
+          <button type="button" class="timer-chip" data-action="timer_set_360">6h</button>
+          <button type="button" class="timer-chip" data-action="timer_set_420">7h</button>
+          <button type="button" class="timer-chip" data-action="timer_set_480">8h</button>
+          <button type="button" class="timer-chip" data-action="timer_set_540">9h</button>
+        </div>
+        <div class="timer-actions">
+          <button type="button" class="timer-chip" data-action="timer_cancel">Cancel timer</button>
+          <button type="button" class="timer-chip" data-action="timer_close">Close</button>
         </div>
       </div>
     `;
@@ -1234,6 +1369,7 @@ class DysonRemoteCard extends HTMLElement {
       heat_minus: ['[data-stepper="thermal"]'],
       osc_plus: ['[data-stepper="oscillation"]'],
       osc_minus: ['[data-stepper="oscillation"]'],
+      timer: ['button[data-action="timer"]'],
       night: ['button[data-action="night"]'],
       direction: ['button[data-action="direction"]'],
     };
@@ -1588,6 +1724,11 @@ class DysonRemoteCard extends HTMLElement {
         28,
       );
     }
+    const timerMinutes = sleepTimerMinutesFromAttrs(attrs);
+    const timerLabel = this._rootEl.querySelector('[data-part="timer-label"]');
+    if (timerLabel) timerLabel.textContent = timerMinutes > 0 ? `Timer ${formatSleepTimerLabel(timerMinutes)}` : "Timer";
+    const timerOverlay = this._rootEl.querySelector('[data-part="timer-overlay"]');
+    if (timerOverlay) timerOverlay.hidden = !this._timerOverlayOpen;
 
     const airflowMid = this._rootEl.querySelector('[data-part="airflow-mid"]');
     if (airflowMid) {
@@ -1706,6 +1847,7 @@ class DysonRemoteCard extends HTMLElement {
           : oscillationIsEnabled(attrs),
     );
     this._toggleEngaged('button[data-action="night"]', isNightModeActive(attrs));
+    this._toggleEngaged('button[data-action="timer"]', timerMinutes > 0);
     this._toggleEngaged('button[data-action="direction"]', directionValue !== "forward");
   }
 
@@ -1878,6 +2020,7 @@ class DysonRemoteCard extends HTMLElement {
     const { fanEntityId, climateEntityId, humidifierEntityId } = resolveEntityPair(hass, configuredEntityId, this._config);
     const entityId = fanEntityId || configuredEntityId;
     if (!entityId) return;
+    const timerDeviceId = resolvedDeviceId(hass, entityId);
 
     const st = entityState(hass, entityId);
     const attrs = st?.attributes || {};
@@ -1898,7 +2041,45 @@ class DysonRemoteCard extends HTMLElement {
     this._setBusy(action, true);
 
     try {
+      const timerSetMatch = /^timer_set_(\d+)$/.exec(action);
+      if (timerSetMatch) {
+        const minutes = Math.max(1, Number(timerSetMatch[1] || 0));
+        const ok = await this._setSleepTimer(hass, timerDeviceId, minutes);
+        if (!ok) {
+          console.warn(
+            "Dyson Remote: sleep timer service not available for",
+            entityId,
+            "(expected hass.entities[entity_id].device_id and hass_dyson.set_sleep_timer)",
+          );
+        }
+        this._timerOverlayOpen = false;
+        this._updateDynamic();
+        return;
+      }
       switch (action) {
+        case "timer": {
+          this._timerOverlayOpen = true;
+          this._updateDynamic();
+          break;
+        }
+        case "timer_close": {
+          this._timerOverlayOpen = false;
+          this._updateDynamic();
+          break;
+        }
+        case "timer_cancel": {
+          const ok = await this._cancelSleepTimer(hass, timerDeviceId);
+          if (!ok) {
+            console.warn(
+              "Dyson Remote: cancel sleep timer service not available for",
+              entityId,
+              "(expected hass.entities[entity_id].device_id and hass_dyson.cancel_sleep_timer)",
+            );
+          }
+          this._timerOverlayOpen = false;
+          this._updateDynamic();
+          break;
+        }
         case "power": {
           const on =
             typeof attrs.is_on === "boolean"
