@@ -26,7 +26,10 @@ export function isAutoModeActive(attrs) {
   if (!attrs) return false;
   if (attrs.auto_mode === true) return true;
   const pm = attrs.preset_mode;
-  return typeof pm === "string" && pm.toLowerCase() === "auto";
+  if (typeof pm === "string" && pm.toLowerCase() === "auto") return true;
+  const fss = attrs.fan_speed_setting;
+  if (typeof fss === "string" && /^\s*auto\s*$/i.test(fss)) return true;
+  return false;
 }
 
 export function isHeatActive(attrs) {
@@ -41,6 +44,313 @@ export function isHeatActive(attrs) {
 
 export function coolingDotActive(attrs) {
   return !isHeatActive(attrs);
+}
+
+/** True for common HA / Dyson-style on values (string ON, boolean true, etc.). */
+function climateAttrBooleanOn(val) {
+  if (val === true) return true;
+  if (val === false || val == null) return false;
+  if (typeof val === "string") {
+    const u = val.toUpperCase().trim();
+    return u === "ON" || u === "TRUE" || u === "YES" || u === "1";
+  }
+  return false;
+}
+
+/**
+ * libdyson / Dyson Gen1-style `climate.*`: `humidity_auto` (e.g. ON) vs `hvac_mode: humidify` only.
+ */
+export function climateHumidityAutoOn(climateAttrs) {
+  return climateAttrBooleanOn(climateAttrs?.humidity_auto);
+}
+
+/** True when the device is targeting humidity automatically (climate `humidity_auto` or humidifier `mode: auto`). */
+export function humiditySetpointIsAutoTarget(climateAttrs, humidifierAttrs) {
+  if (climateHumidityAutoOn(climateAttrs)) return true;
+  const hm = typeof humidifierAttrs?.mode === "string" ? humidifierAttrs.mode.toLowerCase().trim() : "";
+  return hm === "auto";
+}
+
+/**
+ * True when target humidity is driven by the climate entity (Dyson humidifier climates expose
+ * `humidity_auto` and/or `target_humidity_formatted`). The stepper should call `climate.set_humidity`
+ * first even if a `humidifier.*` entity exists, or writes may no-op while the app still updates climate.
+ */
+export function climateHasDysonStyleHumidityTarget(climateAttrs) {
+  const a = climateAttrs || {};
+  if (Object.prototype.hasOwnProperty.call(a, "humidity_auto")) return true;
+  if (typeof a.target_humidity_formatted === "string") return true;
+  return false;
+}
+
+export function objectIdFromEntityId(entityId) {
+  if (typeof entityId !== "string" || !entityId.includes(".")) return "";
+  return entityId.slice(entityId.indexOf(".") + 1);
+}
+
+/**
+ * `humidifier.*` ids to try when pairing a fan card with a different `climate.*` (Dyson device serial is usually on climate/humidifier, not a renamed fan).
+ * Climate object id is tried first, then the fan.
+ */
+export function orderedHumidifierEntityCandidates(fanEntityId, climateEntityId) {
+  const ids = [];
+  const seen = new Set();
+  const pushBase = (base) => {
+    const oid = objectIdFromEntityId(base);
+    if (!oid) return;
+    const id = `humidifier.${oid}`;
+    if (!seen.has(id)) {
+      seen.add(id);
+      ids.push(id);
+    }
+  };
+  pushBase(climateEntityId);
+  pushBase(fanEntityId);
+  return ids;
+}
+
+/**
+ * @param {Record<string, unknown>|null|undefined} states - `hass.states`
+ */
+export function resolveHumidifierEntityId(states, fanEntityId, climateEntityId, humidifierEntityOverride) {
+  const trimmed = typeof humidifierEntityOverride === "string" ? humidifierEntityOverride.trim() : "";
+  if (trimmed.startsWith("humidifier.") && states?.[trimmed]) return trimmed;
+  for (const id of orderedHumidifierEntityCandidates(fanEntityId, climateEntityId)) {
+    if (states?.[id]) return id;
+  }
+  return null;
+}
+
+/** Optional `number.*` target humidity (some integrations expose this instead of acting on climate.set_humidity). */
+export function resolvedHumidityTargetNumberEntityId(
+  states,
+  climateEntityId,
+  humidifierEntityId,
+  humidityTargetEntityTrimmed,
+) {
+  const manual = typeof humidityTargetEntityTrimmed === "string" ? humidityTargetEntityTrimmed.trim() : "";
+  if (manual && states?.[manual]) {
+    const dom = manual.split(".")[0];
+    if (dom === "number") return manual;
+  }
+  const oids = [];
+  for (const eid of [climateEntityId, humidifierEntityId]) {
+    const oid = objectIdFromEntityId(eid);
+    if (oid && !oids.includes(oid)) oids.push(oid);
+  }
+  for (const oid of oids) {
+    const cands = [`number.${oid}_target_humidity`, `number.${oid}_humidifier_target`];
+    for (const id of cands) {
+      if (states?.[id]) return id;
+    }
+  }
+  for (const oid of oids) {
+    for (const id of Object.keys(states || {})) {
+      if (!id.startsWith("number.")) continue;
+      if (!id.includes(oid)) continue;
+      const lo = id.toLowerCase();
+      if (!lo.includes("humidity")) continue;
+      if (lo.includes("target") || lo.includes("setpoint")) return id;
+    }
+  }
+  return null;
+}
+
+/**
+ * Intersect min/max humidity across entities (fan / climate / humidifier). Merging with spread can leave
+ * humidifier `max_humidity` (e.g. 70) overriding climate (50) and produce invalid `climate.set_humidity` values.
+ */
+export function humidityRangeIntersect(attrObjects) {
+  const list = Array.isArray(attrObjects) ? attrObjects.filter((a) => a && typeof a === "object") : [];
+  const mins = [];
+  const maxs = [];
+  for (const a of list) {
+    if (typeof a.min_humidity === "number" && Number.isFinite(a.min_humidity)) mins.push(a.min_humidity);
+    if (typeof a.max_humidity === "number" && Number.isFinite(a.max_humidity)) maxs.push(a.max_humidity);
+  }
+  const minRaw = mins.length ? Math.max(...mins) : 30;
+  const maxRaw = maxs.length ? Math.min(...maxs) : 70;
+  const lo = Math.min(minRaw, maxRaw);
+  const hi = Math.max(minRaw, maxRaw);
+  return { min: lo, max: hi, step: 1 };
+}
+
+/** Map humidifier `available_modes` to the mode string for auto vs manual target humidity (hass-dyson: normal / auto). */
+export function pickHumidifierModeForAutoToggle(availableModes, wantAuto) {
+  if (!Array.isArray(availableModes) || !availableModes.length) return null;
+  const strs = availableModes.filter((m) => typeof m === "string" && m.trim());
+  if (!strs.length) return null;
+  if (wantAuto) {
+    const exact = strs.find((m) => m.toLowerCase().trim() === "auto");
+    if (exact) return exact;
+    return strs.find((m) => /\bauto\b/i.test(m)) || null;
+  }
+  const norm = strs.find((m) => /^(normal|manual)$/i.test(m.trim()));
+  if (norm) return norm;
+  return strs.find((m) => m.toLowerCase().trim() !== "auto") || null;
+}
+
+/** Pick a `select` option string for auto vs manual humidity (sibling entity when `climate.set_humidity` has no `humidity_auto`). */
+export function pickSelectOptionHumidityAuto(options, wantAutoOn) {
+  if (!Array.isArray(options) || !options.length) return null;
+  for (const o of options) {
+    if (typeof o !== "string") continue;
+    const u = o.toUpperCase().trim();
+    if (wantAutoOn) {
+      if (u === "ON" || u === "TRUE" || u === "YES" || u === "1" || u === "AUTO" || u === "AUTOMATIC") return o;
+    } else if (u === "OFF" || u === "FALSE" || u === "NO" || u === "0" || u === "MANUAL") {
+      return o;
+    }
+  }
+  if (wantAutoOn) {
+    const hit = options.find((o) => typeof o === "string" && /\b(auto|automatic)\b/i.test(o));
+    return hit || null;
+  }
+  const hit = options.find((o) => typeof o === "string" && /\b(manual|off)\b/i.test(o));
+  return hit || null;
+}
+
+/**
+ * `select.*` / `switch.*` that mirrors climate `humidity_auto` when the set_humidity service has no toggle field.
+ *
+ * @param {Record<string, unknown>|null|undefined} states - `hass.states`
+ * @param {string|null|undefined} humidityAutoEntityTrimmed - optional configured entity id
+ */
+export function resolvedHumidityAutoToggleEntityId(states, climateEntityId, humidityAutoEntityTrimmed) {
+  const manual = typeof humidityAutoEntityTrimmed === "string" ? humidityAutoEntityTrimmed.trim() : "";
+  if (manual && states?.[manual]) {
+    const dom = manual.split(".")[0];
+    if (dom === "select" || dom === "switch") return manual;
+  }
+  if (!climateEntityId || !states) return null;
+  const oid = objectIdFromEntityId(climateEntityId);
+  if (!oid) return null;
+  const candidates = [
+    `select.${oid}_humidity_auto`,
+    `select.${oid}_auto_humidity`,
+    `switch.${oid}_humidity_auto`,
+  ];
+  for (const id of candidates) {
+    if (states[id]) return id;
+  }
+  for (const id of Object.keys(states)) {
+    if (!id.startsWith("select.")) continue;
+    if (!id.includes(oid)) continue;
+    const lower = id.toLowerCase();
+    if (lower.includes("humidity") && lower.includes("auto")) return id;
+  }
+  return null;
+}
+
+/**
+ * Humidifier / target humidity considered active (fan, climate, or humidifier attributes).
+ * Dyson often uses `humidity_enabled: HUMD` instead of ON.
+ */
+export function isHumidityEnabled(attrs) {
+  const a = attrs || {};
+  if (typeof a.humidity_enabled === "string") {
+    const u = a.humidity_enabled.toUpperCase().trim();
+    if (u === "ON" || u === "HUMD" || u === "HUMIDIFY") return true;
+    return false;
+  }
+  if (typeof a.humidity_enabled === "boolean") return a.humidity_enabled;
+  if (typeof a.is_on === "boolean") return a.is_on;
+  return false;
+}
+
+/**
+ * Target % for humidifier UI. Prefers numeric `target_humidity`, then Dyson `target_humidity_formatted`
+ * (e.g. "0070"), then `humidity` as last resort (may be current reading on some entities).
+ */
+export function inferTargetHumidity(attrs) {
+  const a = attrs || {};
+  if (typeof a.target_humidity === "number" && Number.isFinite(a.target_humidity)) {
+    return a.target_humidity;
+  }
+  const formatted = a.target_humidity_formatted;
+  if (typeof formatted === "string") {
+    const digits = formatted.replace(/\D/g, "");
+    if (digits.length) {
+      const n = parseInt(digits, 10);
+      if (Number.isFinite(n)) {
+        if (n > 100) return Math.min(100, Math.round(n / 100));
+        return Math.min(100, n);
+      }
+    }
+  }
+  if (typeof a.humidity === "number" && Number.isFinite(a.humidity)) {
+    return a.humidity;
+  }
+  return null;
+}
+
+/**
+ * When the device is a humidifier/purifier combo, "Auto purify" follows `climate.hvac_mode`
+ * (hass-dyson: humidify vs fan_only). In fan-only / purify climate mode, the dot also tracks
+ * **fan** auto airflow so a manual speed readout is not paired with a lit purify dot.
+ * Dyson `humidity_auto` does not turn this off: it only means auto target humidity; purify
+ * can still be fan_only with auto airflow while that flag is on.
+ */
+export function humidifierPurifyControlEngaged(fanAttrs, climateAttrs) {
+  const cm =
+    typeof climateAttrs?.hvac_mode === "string" ? climateAttrs.hvac_mode.toLowerCase().trim() : "";
+  if (cm === "humidify") return false;
+  if (cm === "fan_only" || cm === "fan" || cm === "dry") {
+    return isAutoModeActive(fanAttrs);
+  }
+  if (cm === "off") return false;
+  return coolingDotActive(fanAttrs);
+}
+
+/**
+ * "Auto humidify" engaged when the paired climate is in humidify mode or Dyson `humidity_auto`;
+ * the paired `humidifier.*` is in `auto` mode (hass-dyson); otherwise fan Auto preset.
+ */
+export function humidifierAutoHumidifyControlEngaged(fanAttrs, climateAttrs, humidifierAttrs) {
+  const hm = typeof humidifierAttrs?.mode === "string" ? humidifierAttrs.mode.toLowerCase().trim() : "";
+  if (hm === "auto") return true;
+  if (climateHumidityAutoOn(climateAttrs)) return true;
+  const cm =
+    typeof climateAttrs?.hvac_mode === "string" ? climateAttrs.hvac_mode.toLowerCase().trim() : "";
+  if (cm === "humidify") return true;
+  if (cm === "fan_only" || cm === "fan" || cm === "dry") return false;
+  return isAutoModeActive(fanAttrs);
+}
+
+/**
+ * Humidifier **combo mode** (humidity stepper, Auto purify / Auto humidify, climate humidify actions).
+ * True only if at least one of:
+ * 1. Configured entity is `humidifier.*`
+ * 2. `resolveEntityPair` resolved a `humidifier.*` id and it exists in `hass.states`
+ * 3. Paired `climate.*` lists `humidify` in `hvac_modes`
+ * 4. Paired `climate.*` has libdyson-style `humidity_auto` or `humidity_enabled` HUMD / HUMIDIFY
+ *
+ * Not true for ordinary fans that only expose humidity / target_humidity attributes.
+ *
+ * @param {string|null|undefined} configuredEntityId - Lovelace entity id
+ * @param {string|null|undefined} humidifierEntityId - e.g. from `humidifier.<same_object_id>`
+ * @param {boolean} humidifierStateExists - `hass.states[humidifierEntityId]` is present
+ * @param {object} [climateAttrs] - paired climate attributes
+ */
+export function humidifierComboMode(
+  configuredEntityId,
+  humidifierEntityId,
+  humidifierStateExists,
+  climateAttrs,
+) {
+  if (typeof configuredEntityId === "string" && configuredEntityId.startsWith("humidifier.")) return true;
+  if (typeof humidifierEntityId === "string" && humidifierEntityId && humidifierStateExists) return true;
+  const modes = climateAttrs?.hvac_modes;
+  if (Array.isArray(modes) && modes.some((m) => String(m).toLowerCase() === "humidify")) return true;
+  const he = climateAttrs?.humidity_enabled;
+  if (typeof he === "string") {
+    const u = he.toUpperCase().trim();
+    if (u === "HUMD" || u === "HUMIDIFY") return true;
+  }
+  if (climateAttrs != null && Object.prototype.hasOwnProperty.call(climateAttrs, "humidity_auto")) {
+    return true;
+  }
+  return false;
 }
 
 export function airflowCenterLabel(attrs) {

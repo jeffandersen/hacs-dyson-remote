@@ -4,11 +4,20 @@ import {
   adjustTargetTemperature,
   airflowCenterLabel,
   ambientTemperature,
+  climateHumidityAutoOn,
+  climateHasDysonStyleHumidityTarget,
+  humiditySetpointIsAutoTarget,
   coolingDotActive,
   entityIsPowered,
   findHeatPresetName,
   formatTargetTemperature,
   heatingTargetReadout,
+  humidityRangeIntersect,
+  humidifierAutoHumidifyControlEngaged,
+  humidifierComboMode,
+  humidifierPurifyControlEngaged,
+  isHumidityEnabled,
+  inferTargetHumidity,
   inferOscillationPresetIndex,
   isAirflowControlEngaged,
   isAutoModeActive,
@@ -21,11 +30,16 @@ import {
   oscillationIsEnabled,
   oscillationPresetLabel,
   oscillationSelectLooksLikePreset,
+  pickHumidifierModeForAutoToggle,
+  pickSelectOptionHumidityAuto,
+  resolvedHumidityAutoToggleEntityId,
+  resolvedHumidityTargetNumberEntityId,
+  resolveHumidifierEntityId,
   snapTemperatureToStep,
   temperatureStepAndBounds,
 } from "./dyson-logic.js";
 
-const DYSON_REMOTE_BUILD = "2026.03.23.24";
+const DYSON_REMOTE_BUILD = "2026.03.23.41";
 
 /** Pairs: editor/form use show_*; YAML may drop false, so we persist off state as hide_*: true. */
 const AIR_SUBSECTION_FLAG_PAIRS = [
@@ -101,6 +115,48 @@ function entityState(hass, entityId) {
   return hass?.states?.[entityId] || null;
 }
 
+/** HA rejects unknown `climate.set_humidity` keys; only send `humidity_auto` if the service schema includes it. */
+function climateSetHumiditySupportsHumidityAuto(hass) {
+  const fields = hass?.services?.climate?.set_humidity?.fields;
+  return typeof fields === "object" && fields !== null && Object.prototype.hasOwnProperty.call(fields, "humidity_auto");
+}
+
+async function toggleHumidityAutoViaSibling(hass, entityId, wantAutoOn) {
+  const st = hass?.states?.[entityId];
+  if (!st) return false;
+  const domain = entityId.split(".")[0];
+  try {
+    if (domain === "switch") {
+      if (wantAutoOn) await hass.callService("switch", "turn_on", { entity_id: entityId });
+      else await hass.callService("switch", "turn_off", { entity_id: entityId });
+      return true;
+    }
+    if (domain === "select") {
+      const options = st.attributes?.options;
+      const opt = pickSelectOptionHumidityAuto(options, wantAutoOn);
+      if (opt == null) return false;
+      await hass.callService("select", "select_option", { entity_id: entityId, option: opt });
+      return true;
+    }
+  } catch (err) {
+    console.warn("Dyson Remote: humidity auto sibling toggle failed", entityId, err);
+  }
+  return false;
+}
+
+async function tryHumidifierAutoMode(hass, humidifierEntityId, wantAuto, humidifierAttrs) {
+  if (!humidifierEntityId || !hass?.services?.humidifier?.set_mode) return false;
+  const mode = pickHumidifierModeForAutoToggle(humidifierAttrs?.available_modes, wantAuto);
+  if (mode == null) return false;
+  try {
+    await hass.callService("humidifier", "set_mode", { entity_id: humidifierEntityId, mode });
+    return true;
+  } catch (err) {
+    console.warn("Dyson Remote: humidifier.set_mode (auto humidify) failed", err);
+    return false;
+  }
+}
+
 function normalizeDirection(direction) {
   const d = typeof direction === "string" ? direction.toLowerCase() : "";
   if (d === "reverse" || d === "backward" || d === "backwards" || d === "back") return "reverse";
@@ -119,16 +175,33 @@ function relatedClimateEntityId(hass, fanEntityId) {
   const objectId = fanEntityId.slice(idx + 1);
   const candidate = `climate.${objectId}`;
   if (hass?.states?.[candidate]) return candidate;
+  const states = hass?.states;
+  if (!states) return null;
+  const climates = Object.keys(states).filter((id) => id.startsWith("climate."));
+  const dysonHumidifierClimates = climates.filter((id) => {
+    const a = states[id]?.attributes;
+    if (!a || typeof a.min_humidity !== "number" || typeof a.max_humidity !== "number") return false;
+    return Object.prototype.hasOwnProperty.call(a, "humidity_auto");
+  });
+  if (dysonHumidifierClimates.length === 1) return dysonHumidifierClimates[0];
   return null;
 }
 
-function relatedHumidifierEntityId(hass, baseEntityId) {
-  if (!baseEntityId || typeof baseEntityId !== "string") return null;
-  const idx = baseEntityId.indexOf(".");
-  if (idx < 0) return null;
-  const objectId = baseEntityId.slice(idx + 1);
-  const candidate = `humidifier.${objectId}`;
-  if (hass?.states?.[candidate]) return candidate;
+function pickClimateEntityForFan(hass, fanEntityId, config) {
+  const trimmed = typeof config?.climate_entity === "string" ? config.climate_entity.trim() : "";
+  if (trimmed.startsWith("climate.") && hass?.states?.[trimmed]) return trimmed;
+  return relatedClimateEntityId(hass, fanEntityId);
+}
+
+function effectiveFanEntityId(hass, fanEntityId, climateEntityId, configuredEntityId) {
+  if (fanEntityId && hass?.states?.[fanEntityId]) return fanEntityId;
+  if (climateEntityId) {
+    const f = relatedFanEntityId(hass, climateEntityId);
+    if (f && hass?.states?.[f]) return f;
+  }
+  if (typeof configuredEntityId === "string" && configuredEntityId.startsWith("fan.") && hass?.states?.[configuredEntityId]) {
+    return configuredEntityId;
+  }
   return null;
 }
 
@@ -189,62 +262,29 @@ function matchOscillationSelectOption(options, degrees) {
   return null;
 }
 
-function humidityRange(attrs) {
-  const a = attrs || {};
-  const minRaw = typeof a.min_humidity === "number" ? a.min_humidity : 30;
-  const maxRaw = typeof a.max_humidity === "number" ? a.max_humidity : 70;
-  const lo = Math.min(minRaw, maxRaw);
-  const hi = Math.max(minRaw, maxRaw);
-  return { min: lo, max: hi, step: 1 };
-}
-
-function inferTargetHumidity(attrs) {
-  const a = attrs || {};
-  const candidates = [a.target_humidity, a.humidity];
-  for (const value of candidates) {
-    if (typeof value === "number" && Number.isFinite(value)) {
-      return value;
-    }
-  }
-  return null;
-}
-
-function isHumidityEnabled(attrs) {
-  const a = attrs || {};
-  if (typeof a.humidity_enabled === "string") return a.humidity_enabled.toUpperCase() === "ON";
-  if (typeof a.humidity_enabled === "boolean") return a.humidity_enabled;
-  if (typeof a.is_on === "boolean") return a.is_on;
-  return false;
-}
-
-function humidityCapability(fanAttrs, climateAttrs, humidifierAttrs) {
-  const combined = { ...(fanAttrs || {}), ...(climateAttrs || {}), ...(humidifierAttrs || {}) };
-  const hasHumidityBounds =
-    (typeof combined.min_humidity === "number" && Number.isFinite(combined.min_humidity)) ||
-    (typeof combined.max_humidity === "number" && Number.isFinite(combined.max_humidity));
-  const hasHumidityValue =
-    (typeof combined.target_humidity === "number" && Number.isFinite(combined.target_humidity)) ||
-    (typeof combined.humidity === "number" && Number.isFinite(combined.humidity)) ||
-    typeof combined.humidity_enabled !== "undefined";
-  return hasHumidityBounds || hasHumidityValue;
-}
-
-function resolveEntityPair(hass, configuredEntityId) {
+function resolveEntityPair(hass, configuredEntityId, config = {}) {
   if (!configuredEntityId || typeof configuredEntityId !== "string") {
     return { fanEntityId: null, climateEntityId: null, humidifierEntityId: null };
   }
   if (configuredEntityId.startsWith("fan.")) {
+    const climateEntityId = pickClimateEntityForFan(hass, configuredEntityId, config);
     return {
       fanEntityId: configuredEntityId,
-      climateEntityId: relatedClimateEntityId(hass, configuredEntityId),
-      humidifierEntityId: relatedHumidifierEntityId(hass, configuredEntityId),
+      climateEntityId,
+      humidifierEntityId: resolveHumidifierEntityId(
+        hass.states,
+        configuredEntityId,
+        climateEntityId,
+        config.humidifier_entity,
+      ),
     };
   }
   if (configuredEntityId.startsWith("climate.")) {
+    const fanEntityId = relatedFanEntityId(hass, configuredEntityId);
     return {
-      fanEntityId: relatedFanEntityId(hass, configuredEntityId),
+      fanEntityId,
       climateEntityId: configuredEntityId,
-      humidifierEntityId: relatedHumidifierEntityId(hass, configuredEntityId),
+      humidifierEntityId: resolveHumidifierEntityId(hass.states, fanEntityId, configuredEntityId, config.humidifier_entity),
     };
   }
   if (configuredEntityId.startsWith("humidifier.")) {
@@ -255,10 +295,11 @@ function resolveEntityPair(hass, configuredEntityId) {
       humidifierEntityId: configuredEntityId,
     };
   }
+  const climateEntityId = pickClimateEntityForFan(hass, configuredEntityId, config);
   return {
     fanEntityId: configuredEntityId,
-    climateEntityId: relatedClimateEntityId(hass, configuredEntityId),
-    humidifierEntityId: relatedHumidifierEntityId(hass, configuredEntityId),
+    climateEntityId,
+    humidifierEntityId: resolveHumidifierEntityId(hass.states, configuredEntityId, climateEntityId, config.humidifier_entity),
   };
 }
 
@@ -321,6 +362,7 @@ class DysonRemoteCard extends HTMLElement {
     this._optimisticAttrs = null;
     this._optimisticExpected = null;
     this._optimisticOscPresetIndex = null;
+    this._optimisticClimateHumidityAutoExpected = null;
     this._optimisticClearTimer = null;
   }
 
@@ -353,6 +395,12 @@ class DysonRemoteCard extends HTMLElement {
       title: typeof config.title === "string" ? config.title : "",
       oscillation_select_entity:
         typeof config.oscillation_select_entity === "string" ? config.oscillation_select_entity.trim() : "",
+      climate_entity: typeof config.climate_entity === "string" ? config.climate_entity.trim() : "",
+      humidity_auto_entity:
+        typeof config.humidity_auto_entity === "string" ? config.humidity_auto_entity.trim() : "",
+      humidifier_entity: typeof config.humidifier_entity === "string" ? config.humidifier_entity.trim() : "",
+      humidity_target_entity:
+        typeof config.humidity_target_entity === "string" ? config.humidity_target_entity.trim() : "",
     };
     this._renderStatic();
     this._updateDynamic();
@@ -402,12 +450,20 @@ class DysonRemoteCard extends HTMLElement {
     return false;
   }
 
-  async _setCoolingMode(hass, domain, entityId, attrs) {
+  async _setCoolingMode(hass, domain, entityId, attrs, climateAttrs) {
     const climateEntityId = relatedClimateEntityId(hass, entityId);
     if (climateEntityId && hass?.services?.climate?.set_hvac_mode) {
+      const ca = climateAttrs || hass?.states?.[climateEntityId]?.attributes || {};
+      const modes = Array.isArray(ca.hvac_modes) ? ca.hvac_modes : [];
+      const norm = (m) => String(m).toLowerCase();
+      const pick =
+        modes.find((m) => norm(m) === "fan_only") ||
+        modes.find((m) => norm(m) === "fan") ||
+        modes.find((m) => norm(m) === "dry");
+      const hvacMode = pick || "fan_only";
       await hass.callService("climate", "set_hvac_mode", {
         entity_id: climateEntityId,
-        hvac_mode: "fan_only",
+        hvac_mode: hvacMode,
       });
       return true;
     }
@@ -726,6 +782,11 @@ class DysonRemoteCard extends HTMLElement {
         outline: 2px solid rgba(255,255,255,0.35);
         outline-offset: 2px;
       }
+      /* [hidden] must beat .icon-slot display:grid (same specificity; otherwise hidden is ignored). */
+      .icon-slot[hidden],
+      .auto-word[hidden] {
+        display: none !important;
+      }
       .icon-slot {
         display: grid;
         place-items: center;
@@ -858,6 +919,19 @@ class DysonRemoteCard extends HTMLElement {
         color: var(--drc-blue);
         filter: drop-shadow(0 0 10px rgba(90, 200, 250, 0.45));
       }
+      button[data-action="cooling"]:not(.is-engaged) [data-part="humidifier-purify-auto"] {
+        color: rgba(255, 255, 255, 0.38);
+      }
+      button[data-action="cooling"].is-engaged [data-part="humidifier-purify-auto"] {
+        color: #ffffff;
+      }
+      button[data-action="auto_mode"]:not(.is-engaged) [data-part="auto-humidify-icon"] {
+        color: rgba(255, 255, 255, 0.38);
+      }
+      button[data-action="auto_mode"].is-engaged [data-part="auto-humidify-icon"] {
+        color: var(--drc-blue);
+        filter: drop-shadow(0 0 10px rgba(90, 200, 250, 0.45));
+      }
       [data-stepper="thermal"]:not(.is-engaged) .icon-slot {
         color: rgba(255, 255, 255, 0.45);
       }
@@ -985,13 +1059,15 @@ class DysonRemoteCard extends HTMLElement {
         </div>
         <div class="cell">
           <button type="button" class="btn-circle" data-action="cooling" aria-label="Cooling">
-            <span class="icon-slot" data-ha-icon="mdi:circle" data-ha-size="30"></span>
+            <span class="icon-slot" data-part="cooling-circle-icon" data-ha-icon="mdi:circle" data-ha-size="30"></span>
+            <span class="auto-word" data-part="humidifier-purify-auto" hidden>AUTO</span>
           </button>
           <div class="label" data-part="cooling-label">Cooling</div>
         </div>
         <div class="cell">
           <button type="button" class="btn-circle" data-action="auto_mode" aria-label="Auto mode">
             <span class="auto-word" data-part="auto-word">AUTO</span>
+            <span class="icon-slot" data-part="auto-humidify-icon" hidden data-ha-icon="mdi:water" data-ha-size="28"></span>
           </button>
           <div class="label" data-part="auto-label">Auto mode</div>
         </div>
@@ -1115,6 +1191,55 @@ class DysonRemoteCard extends HTMLElement {
     this._optimisticAttrs = null;
     this._optimisticExpected = null;
     this._optimisticOscPresetIndex = null;
+    this._optimisticClimateHumidityAutoExpected = null;
+  }
+
+  _reconcileClimateHumidityAutoOptimistic(climateEntityId) {
+    if (this._optimisticClimateHumidityAutoExpected == null || !climateEntityId || !this._hass?.states) return;
+    const ca = this._hass.states[climateEntityId]?.attributes || {};
+    if (climateHumidityAutoOn(ca) === this._optimisticClimateHumidityAutoExpected) {
+      this._optimisticClimateHumidityAutoExpected = null;
+    }
+  }
+
+  /** Start or restart the 12s clear countdown (call when applying new optimistic state). */
+  _bumpOptimisticClearTimer() {
+    const hasFan = this._optimisticAttrs && Object.keys(this._optimisticAttrs).length > 0;
+    const hasClimate = this._optimisticClimateHumidityAutoExpected != null;
+    const hasOsc = this._optimisticOscPresetIndex != null;
+    if (!hasFan && !hasClimate && !hasOsc) {
+      if (this._optimisticClearTimer) {
+        clearTimeout(this._optimisticClearTimer);
+        this._optimisticClearTimer = null;
+      }
+      return;
+    }
+    if (this._optimisticClearTimer) {
+      clearTimeout(this._optimisticClearTimer);
+    }
+    this._optimisticClearTimer = setTimeout(() => {
+      this._clearOptimisticState();
+      this._updateDynamic();
+    }, 12000);
+  }
+
+  /** Stop timer if nothing pending; otherwise leave an existing countdown alone (avoid resetting every hass poll). */
+  _maybeResyncOptimisticClearTimer() {
+    const hasFan = this._optimisticAttrs && Object.keys(this._optimisticAttrs).length > 0;
+    const hasClimate = this._optimisticClimateHumidityAutoExpected != null;
+    const hasOsc = this._optimisticOscPresetIndex != null;
+    if (!hasFan && !hasClimate && !hasOsc) {
+      if (this._optimisticClearTimer) {
+        clearTimeout(this._optimisticClearTimer);
+        this._optimisticClearTimer = null;
+      }
+      return;
+    }
+    if (this._optimisticClearTimer) return;
+    this._optimisticClearTimer = setTimeout(() => {
+      this._clearOptimisticState();
+      this._updateDynamic();
+    }, 12000);
   }
 
   /**
@@ -1122,8 +1247,7 @@ class DysonRemoteCard extends HTMLElement {
    * so the UI does not snap back to stale values before HA catches up.
    */
   _reconcileOptimisticState(st, climateEntityId, humidifierEntityId, fanEntityId) {
-    if (!this._optimisticAttrs || !this._optimisticExpected) return;
-
+    if (this._optimisticAttrs && this._optimisticExpected) {
     const realFan = st?.attributes || {};
     const climateAttrs = climateEntityId ? this._hass?.states?.[climateEntityId]?.attributes || {} : {};
     const humidifierAttrs = humidifierEntityId ? this._hass?.states?.[humidifierEntityId]?.attributes || {} : {};
@@ -1171,6 +1295,18 @@ class DysonRemoteCard extends HTMLElement {
       }
     }
 
+    if (nextPatch.preset_mode !== undefined && nextExpected.preset_mode !== undefined) {
+      const r = realFan.preset_mode;
+      const exp = nextExpected.preset_mode;
+      if (
+        typeof r === "string" &&
+        typeof exp === "string" &&
+        r.toLowerCase().trim() === exp.toLowerCase().trim()
+      ) {
+        del("preset_mode");
+      }
+    }
+
     if (nextPatch.target_temperature !== undefined && nextExpected.target_temperature !== undefined) {
       const r = thermalReal.target_temperature;
       if (typeof r === "number" && Number.isFinite(r) && Math.abs(r - nextExpected.target_temperature) <= 0.55) {
@@ -1203,11 +1339,14 @@ class DysonRemoteCard extends HTMLElement {
     }
 
     if (Object.keys(nextPatch).length === 0) {
-      this._clearOptimisticState();
+      this._optimisticAttrs = null;
+      this._optimisticExpected = null;
     } else {
       this._optimisticAttrs = nextPatch;
       this._optimisticExpected = nextExpected;
     }
+    }
+    this._maybeResyncOptimisticClearTimer();
   }
 
   _applyOptimisticPatch(patch, meta = {}) {
@@ -1217,27 +1356,41 @@ class DysonRemoteCard extends HTMLElement {
     if (meta.oscPresetIndex != null) {
       this._optimisticOscPresetIndex = meta.oscPresetIndex;
     }
-    if (this._optimisticClearTimer) {
-      clearTimeout(this._optimisticClearTimer);
-    }
-    this._optimisticClearTimer = setTimeout(() => {
-      this._clearOptimisticState();
-      this._updateDynamic();
-    }, 12000);
+    this._bumpOptimisticClearTimer();
     this._updateDynamic();
   }
 
   _updateDynamic() {
     if (!this._rootEl || !this._hass) return;
-    const { fanEntityId, climateEntityId, humidifierEntityId } = resolveEntityPair(this._hass, this._config.entity);
+    const { fanEntityId, climateEntityId, humidifierEntityId } = resolveEntityPair(
+      this._hass,
+      this._config.entity,
+      this._config,
+    );
     const st = fanEntityId ? entityState(this._hass, fanEntityId) : entityState(this._hass, this._config.entity);
+    this._reconcileClimateHumidityAutoOptimistic(climateEntityId);
     this._reconcileOptimisticState(st, climateEntityId, humidifierEntityId, fanEntityId);
     const realFanAttrs = st?.attributes || {};
     const attrs = { ...realFanAttrs, ...(this._optimisticAttrs || {}) };
-    const climateAttrs = climateEntityId ? this._hass?.states?.[climateEntityId]?.attributes || {} : {};
+    const climateAttrsRaw = climateEntityId ? this._hass?.states?.[climateEntityId]?.attributes || {} : {};
+    const climateAttrs =
+      this._optimisticClimateHumidityAutoExpected != null && climateEntityId
+        ? {
+            ...climateAttrsRaw,
+            humidity_auto: this._optimisticClimateHumidityAutoExpected ? "ON" : "OFF",
+          }
+        : climateAttrsRaw;
     const humidifierAttrs = humidifierEntityId ? this._hass?.states?.[humidifierEntityId]?.attributes || {} : {};
     const thermalAttrs = mergedThermalAttrs(attrs, climateAttrs);
-    const humidifierMode = humidityCapability(attrs, climateAttrs, humidifierAttrs);
+    const humidifierStateExists = Boolean(humidifierEntityId && this._hass?.states?.[humidifierEntityId]);
+    const humidifierMode = humidifierComboMode(
+      this._config.entity,
+      humidifierEntityId,
+      humidifierStateExists,
+      climateAttrs,
+    );
+    /* Same merge as humidity readout: primary entity (+ optimistic) last; avoids humidifier `is_on` masking climate `humidity_enabled: OFF`. */
+    const mergedHumidity = humidifierMode ? { ...climateAttrs, ...humidifierAttrs, ...attrs } : null;
 
     const tempEl = this._rootEl.querySelector('[data-part="temp"]');
     if (tempEl && this._config.show_temperature_header) {
@@ -1314,7 +1467,32 @@ class DysonRemoteCard extends HTMLElement {
     }
 
     const autoWord = this._rootEl.querySelector('[data-part="auto-word"]');
-    if (autoWord) {
+    const coolingCircle = this._rootEl.querySelector('[data-part="cooling-circle-icon"]');
+    const humidifierPurifyAuto = this._rootEl.querySelector('[data-part="humidifier-purify-auto"]');
+    const autoHumidifyIcon = this._rootEl.querySelector('[data-part="auto-humidify-icon"]');
+    const coolingBtn = this._rootEl.querySelector('button[data-action="cooling"]');
+    const autoModeBtn = this._rootEl.querySelector('button[data-action="auto_mode"]');
+    if (coolingBtn) {
+      coolingBtn.setAttribute("aria-label", humidifierMode ? "Auto purify" : "Cooling");
+    }
+    if (autoModeBtn) {
+      autoModeBtn.setAttribute("aria-label", humidifierMode ? "Auto humidify" : "Auto mode");
+    }
+    if (humidifierMode) {
+      if (coolingCircle) coolingCircle.hidden = true;
+      if (humidifierPurifyAuto) humidifierPurifyAuto.hidden = false;
+      if (autoWord) autoWord.hidden = true;
+      if (autoHumidifyIcon) {
+        autoHumidifyIcon.hidden = false;
+        mountHaIcon(autoHumidifyIcon, "mdi:water", 28);
+      }
+    } else {
+      if (coolingCircle) coolingCircle.hidden = false;
+      if (humidifierPurifyAuto) humidifierPurifyAuto.hidden = true;
+      if (autoWord) autoWord.hidden = false;
+      if (autoHumidifyIcon) autoHumidifyIcon.hidden = true;
+    }
+    if (autoWord && !humidifierMode) {
       autoWord.classList.toggle("on", isAutoModeActive(attrs));
     }
 
@@ -1349,9 +1527,14 @@ class DysonRemoteCard extends HTMLElement {
     const thermalTarget = this._rootEl.querySelector('[data-part="thermal-target"]');
     if (thermalTarget) {
       let readout = "OFF";
-      if (humidifierMode) {
-        const target = inferTargetHumidity({ ...attrs, ...climateAttrs, ...humidifierAttrs });
-        readout = isHumidityEnabled({ ...attrs, ...climateAttrs, ...humidifierAttrs }) && target != null ? `${Math.round(target)}%` : "OFF";
+      if (humidifierMode && mergedHumidity) {
+        if (humiditySetpointIsAutoTarget(climateAttrs, humidifierAttrs)) {
+          readout = "AUTO";
+        } else {
+          const target = inferTargetHumidity(mergedHumidity);
+          readout =
+            isHumidityEnabled(mergedHumidity) && target != null ? `${Math.round(target)}%` : "OFF";
+        }
       } else {
         readout = isHeatActive(attrs) ? heatingTargetReadout(thermalAttrs) : "OFF";
       }
@@ -1416,12 +1599,20 @@ class DysonRemoteCard extends HTMLElement {
     }
 
     this._toggleEngaged('button[data-action="power"]', entityIsPowered(st, attrs));
-    this._toggleEngaged('button[data-action="cooling"]', coolingDotActive(attrs));
-    this._toggleEngaged('button[data-action="auto_mode"]', isAutoModeActive(attrs));
+    this._toggleEngaged(
+      'button[data-action="cooling"]',
+      humidifierMode ? humidifierPurifyControlEngaged(attrs, climateAttrs) : coolingDotActive(attrs),
+    );
+    this._toggleEngaged(
+      'button[data-action="auto_mode"]',
+      humidifierMode
+        ? humidifierAutoHumidifyControlEngaged(attrs, climateAttrs, humidifierAttrs)
+        : isAutoModeActive(attrs),
+    );
     this._toggleEngaged('[data-stepper="airflow"]', isAirflowControlEngaged(st, attrs));
     this._toggleEngaged(
       '[data-stepper="thermal"]',
-      humidifierMode ? isHumidityEnabled({ ...attrs, ...climateAttrs, ...humidifierAttrs }) : isHeatActive(attrs),
+      humidifierMode && mergedHumidity ? isHumidityEnabled(mergedHumidity) : isHeatActive(attrs),
     );
     this._toggleEngaged(
       '[data-stepper="oscillation"]',
@@ -1439,7 +1630,7 @@ class DysonRemoteCard extends HTMLElement {
     const hass = this._hass;
     const configuredEntityId = this._config.entity;
     if (!hass || !configuredEntityId) return;
-    const { fanEntityId, climateEntityId, humidifierEntityId } = resolveEntityPair(hass, configuredEntityId);
+    const { fanEntityId, climateEntityId, humidifierEntityId } = resolveEntityPair(hass, configuredEntityId, this._config);
     const entityId = fanEntityId || configuredEntityId;
     if (!entityId) return;
 
@@ -1448,7 +1639,13 @@ class DysonRemoteCard extends HTMLElement {
     const climateAttrs = climateEntityId ? hass?.states?.[climateEntityId]?.attributes || {} : {};
     const humidifierAttrs = humidifierEntityId ? hass?.states?.[humidifierEntityId]?.attributes || {} : {};
     const thermalAttrs = mergedThermalAttrs(attrs, climateAttrs);
-    const humidifierMode = humidityCapability(attrs, climateAttrs, humidifierAttrs);
+    const humidifierStateExists = Boolean(humidifierEntityId && hass?.states?.[humidifierEntityId]);
+    const humidifierMode = humidifierComboMode(
+      configuredEntityId,
+      humidifierEntityId,
+      humidifierStateExists,
+      climateAttrs,
+    );
     const domain = entityId.split(".")[0] || "fan";
 
     if (this._pendingActions.has(action)) return;
@@ -1468,24 +1665,187 @@ class DysonRemoteCard extends HTMLElement {
         case "cooling": {
           await hass.callService(domain, "turn_on", { entity_id: entityId });
           try {
-            await this._setCoolingMode(hass, domain, entityId, attrs);
+            await this._setCoolingMode(hass, domain, entityId, attrs, climateAttrs);
           } catch (err) {
             console.warn("Dyson Remote: cooling mode switch failed", err);
           }
-          const amb = ambientTemperature(thermalAttrs);
-          if (amb != null) {
-            const { min, max, step } = temperatureStepAndBounds(thermalAttrs);
-            const t = snapTemperatureToStep(amb, min, max, step);
-            try {
-              await this._setTargetTemperature(hass, domain, entityId, t);
-            } catch (err) {
-              console.warn("Dyson Remote: Cooling temperature sync failed", err);
+          /* Combo "Auto purify": climate fan_only is not enough — engagement also requires fan Auto airflow. */
+          if (humidifierMode) {
+            const fanTargetId = effectiveFanEntityId(hass, fanEntityId, climateEntityId, configuredEntityId);
+            if (fanTargetId) {
+              const fanDomain = fanTargetId.split(".")[0] || "fan";
+              const fanSt = entityState(hass, fanTargetId);
+              const fam = fanSt?.attributes || {};
+              const pm = normalizePresetModes(fam.preset_modes);
+              const autoName = pm.find((m) => m.toLowerCase() === "auto");
+              const svc = hass?.services?.[fanDomain];
+              if (autoName && svc?.set_preset_mode) {
+                this._applyOptimisticPatch({ preset_mode: autoName, auto_mode: true });
+                try {
+                  await hass.callService(fanDomain, "set_preset_mode", { entity_id: fanTargetId, preset_mode: autoName });
+                } catch (err) {
+                  console.warn("Dyson Remote: Auto purify fan Auto preset failed", err);
+                }
+              } else if (svc?.turn_on && Object.hasOwn(svc.turn_on.fields || {}, "auto_mode")) {
+                this._applyOptimisticPatch({ auto_mode: true });
+                try {
+                  await hass.callService(fanDomain, "turn_on", { entity_id: fanTargetId, auto_mode: true });
+                } catch (err) {
+                  console.warn("Dyson Remote: Auto purify fan.turn_on auto_mode failed", err);
+                }
+              }
+            }
+          }
+          /* Humidifier+purifier climate entities often have no target temperature — skip ambient sync. */
+          if (!humidifierMode) {
+            const amb = ambientTemperature(thermalAttrs);
+            if (amb != null) {
+              const { min, max, step } = temperatureStepAndBounds(thermalAttrs);
+              const t = snapTemperatureToStep(amb, min, max, step);
+              try {
+                await this._setTargetTemperature(hass, domain, entityId, t);
+              } catch (err) {
+                console.warn("Dyson Remote: Cooling temperature sync failed", err);
+              }
             }
           }
           break;
         }
         case "auto_mode": {
           await hass.callService(domain, "turn_on", { entity_id: entityId });
+          let humidifierAutoHandled = false;
+          if (
+            humidifierMode &&
+            climateEntityId &&
+            hass?.services?.climate?.set_hvac_mode &&
+            Array.isArray(climateAttrs.hvac_modes)
+          ) {
+            const norm = (m) => String(m).toLowerCase();
+            const modes = climateAttrs.hvac_modes;
+            const humidifyMode = modes.find((m) => norm(m) === "humidify");
+            if (humidifyMode) {
+              const cm = typeof climateAttrs.hvac_mode === "string" ? climateAttrs.hvac_mode.toLowerCase() : "";
+              const fanOnly =
+                modes.find((m) => norm(m) === "fan_only") ||
+                modes.find((m) => norm(m) === "fan") ||
+                modes.find((m) => norm(m) === "dry");
+              try {
+                if (cm === "humidify" && fanOnly) {
+                  await hass.callService("climate", "set_hvac_mode", {
+                    entity_id: climateEntityId,
+                    hvac_mode: fanOnly,
+                  });
+                } else {
+                  await hass.callService("climate", "set_hvac_mode", {
+                    entity_id: climateEntityId,
+                    hvac_mode: humidifyMode,
+                  });
+                }
+                humidifierAutoHandled = true;
+              } catch (err) {
+                console.warn("Dyson Remote: Auto humidify hvac_mode failed", err);
+              }
+            }
+          }
+          if (
+            !humidifierAutoHandled &&
+            humidifierMode &&
+            climateEntityId &&
+            hass?.services?.climate?.set_humidity &&
+            climateAttrs != null &&
+            Object.prototype.hasOwnProperty.call(climateAttrs, "humidity_auto")
+          ) {
+            const merged = { ...attrs, ...climateAttrs, ...humidifierAttrs };
+            const hRaw = inferTargetHumidity(merged);
+            const { min: lo, max: hi } = humidityRangeIntersect([attrs, climateAttrs, humidifierAttrs]);
+            const hum = Math.max(lo, Math.min(hi, hRaw != null ? Math.round(hRaw) : Math.round((lo + hi) / 2)));
+            const autoNow = climateHumidityAutoOn(climateAttrs);
+            const wantAuto = !autoNow;
+            const supportsHumidityAutoField = climateSetHumiditySupportsHumidityAuto(hass);
+            const humidityAutoSiblingId = resolvedHumidityAutoToggleEntityId(
+              hass.states,
+              climateEntityId,
+              this._config.humidity_auto_entity,
+            );
+            let usedHumidifierModeForAuto = false;
+            try {
+              if (supportsHumidityAutoField) {
+                await hass.callService("climate", "set_humidity", {
+                  entity_id: climateEntityId,
+                  humidity: hum,
+                  humidity_auto: wantAuto,
+                });
+                this._optimisticClimateHumidityAutoExpected = wantAuto;
+                this._bumpOptimisticClearTimer();
+                this._updateDynamic();
+                humidifierAutoHandled = true;
+              } else if (
+                humidityAutoSiblingId &&
+                (await toggleHumidityAutoViaSibling(hass, humidityAutoSiblingId, wantAuto))
+              ) {
+                this._optimisticClimateHumidityAutoExpected = wantAuto;
+                this._bumpOptimisticClearTimer();
+                this._updateDynamic();
+                humidifierAutoHandled = true;
+              } else if (
+                humidifierEntityId &&
+                (await tryHumidifierAutoMode(hass, humidifierEntityId, wantAuto, humidifierAttrs))
+              ) {
+                usedHumidifierModeForAuto = true;
+                this._optimisticClimateHumidityAutoExpected = wantAuto;
+                this._bumpOptimisticClearTimer();
+                this._updateDynamic();
+                humidifierAutoHandled = true;
+              } else {
+                await hass.callService("climate", "set_humidity", {
+                  entity_id: climateEntityId,
+                  humidity: hum,
+                });
+                console.warn(
+                  "Dyson Remote: Auto humidify cannot toggle humidity_auto (climate.set_humidity has no humidity_auto field; no select/switch found; humidifier.set_mode unavailable). Set optional humidity_auto_entity in the card config.",
+                );
+                humidifierAutoHandled = true;
+              }
+            } catch (err) {
+              console.warn("Dyson Remote: climate.set_humidity humidity_auto toggle failed", err);
+            }
+            if (
+              humidifierAutoHandled &&
+              humidifierEntityId &&
+              hass?.services?.humidifier?.set_humidity &&
+              !usedHumidifierModeForAuto
+            ) {
+              try {
+                await hass.callService("humidifier", "set_humidity", {
+                  entity_id: humidifierEntityId,
+                  humidity: hum,
+                });
+              } catch (e) {
+                console.warn("Dyson Remote: humidifier.set_humidity (paired auto humidify) failed", e);
+              }
+            }
+          }
+          if (
+            !humidifierAutoHandled &&
+            humidifierMode &&
+            humidifierEntityId &&
+            climateEntityId &&
+            climateAttrs != null &&
+            !Object.prototype.hasOwnProperty.call(climateAttrs, "humidity_auto") &&
+            hass?.services?.humidifier?.set_mode
+          ) {
+            const autoNow =
+              (typeof humidifierAttrs?.mode === "string" && humidifierAttrs.mode.toLowerCase().trim() === "auto") ||
+              climateHumidityAutoOn(climateAttrs);
+            const wantAuto = !autoNow;
+            if (await tryHumidifierAutoMode(hass, humidifierEntityId, wantAuto, humidifierAttrs)) {
+              this._optimisticClimateHumidityAutoExpected = wantAuto;
+              this._bumpOptimisticClearTimer();
+              this._updateDynamic();
+              humidifierAutoHandled = true;
+            }
+          }
+          if (humidifierAutoHandled) break;
           const modes = normalizePresetModes(attrs.preset_modes);
           const auto = modes.find((m) => m.toLowerCase() === "auto");
           const manual = modes.find((m) => m.toLowerCase() === "manual");
@@ -1503,13 +1863,17 @@ class DysonRemoteCard extends HTMLElement {
             typeof attrs.percentage === "number" && Number.isFinite(attrs.percentage)
               ? attrs.percentage
               : 40;
-          this._applyOptimisticPatch({
+          const manual = normalizePresetModes(attrs.preset_modes).find((m) => m.toLowerCase() === "manual");
+          const patch = {
             percentage: adjustFanPercentage(base, dir, attrs, 100),
             auto_mode: false,
-          });
+          };
+          if (isAutoModeActive(attrs) && manual) {
+            patch.preset_mode = manual;
+          }
+          this._applyOptimisticPatch(patch);
           await hass.callService(domain, "turn_on", { entity_id: entityId });
           if (isAutoModeActive(attrs)) {
-            const manual = normalizePresetModes(attrs.preset_modes).find((m) => m.toLowerCase() === "manual");
             if (manual) {
               await hass.callService(domain, "set_preset_mode", { entity_id: entityId, preset_mode: manual });
             }
@@ -1525,7 +1889,7 @@ class DysonRemoteCard extends HTMLElement {
         case "heat_plus": {
           if (humidifierMode) {
             const sourceAttrs = { ...attrs, ...climateAttrs, ...humidifierAttrs };
-            const { min, max } = humidityRange(sourceAttrs);
+            const { min, max } = humidityRangeIntersect([attrs, climateAttrs, humidifierAttrs]);
             const dir = action === "heat_minus" ? -1 : 1;
             const base = inferTargetHumidity(sourceAttrs);
             const current = base == null ? min : Math.max(min, Math.min(max, Math.round(base)));
@@ -1540,18 +1904,69 @@ class DysonRemoteCard extends HTMLElement {
               await hass.callService(domain, "turn_on", { entity_id: entityId });
             } else if (domain === "humidifier") {
               await hass.callService("humidifier", "turn_on", { entity_id: entityId });
+            } else if (domain === "climate" && hass?.services?.climate?.turn_on) {
+              try {
+                await hass.callService("climate", "turn_on", { entity_id: entityId });
+              } catch (err) {
+                console.warn("Dyson Remote: climate.turn_on before humidity step failed", err);
+              }
+            }
+            const preferClimateHumidity =
+              climateEntityId &&
+              hass?.services?.climate?.set_humidity &&
+              climateHasDysonStyleHumidityTarget(climateAttrs);
+            let humidityTargetSent = false;
+            if (preferClimateHumidity) {
+              try {
+                await hass.callService("climate", "set_humidity", { entity_id: climateEntityId, humidity: next });
+                humidityTargetSent = true;
+              } catch (err) {
+                console.warn("Dyson Remote: climate.set_humidity (humidity stepper) failed", err);
+              }
             }
             if (humidifierEntityId && hass?.services?.humidifier?.set_humidity) {
-              await hass.callService("humidifier", "set_humidity", { entity_id: humidifierEntityId, humidity: next });
-            } else if (hass?.services?.humidifier?.set_humidity && domain === "humidifier") {
-              await hass.callService("humidifier", "set_humidity", { entity_id: entityId, humidity: next });
-            } else if (climateEntityId && hass?.services?.climate?.set_humidity) {
-              await hass.callService("climate", "set_humidity", { entity_id: climateEntityId, humidity: next });
-            } else {
+              try {
+                await hass.callService("humidifier", "set_humidity", { entity_id: humidifierEntityId, humidity: next });
+                humidityTargetSent = true;
+              } catch (err) {
+                console.warn("Dyson Remote: humidifier.set_humidity (humidity stepper) failed", err);
+              }
+            }
+            if (!humidityTargetSent && hass?.services?.humidifier?.set_humidity && domain === "humidifier") {
+              try {
+                await hass.callService("humidifier", "set_humidity", { entity_id: entityId, humidity: next });
+                humidityTargetSent = true;
+              } catch (err) {
+                console.warn("Dyson Remote: humidifier.set_humidity (entity stepper) failed", err);
+              }
+            }
+            if (!humidityTargetSent && climateEntityId && hass?.services?.climate?.set_humidity) {
+              try {
+                await hass.callService("climate", "set_humidity", { entity_id: climateEntityId, humidity: next });
+                humidityTargetSent = true;
+              } catch (err) {
+                console.warn("Dyson Remote: climate.set_humidity (humidity stepper fallback) failed", err);
+              }
+            }
+            const humidityNumberId = resolvedHumidityTargetNumberEntityId(
+              hass.states,
+              climateEntityId,
+              humidifierEntityId,
+              this._config.humidity_target_entity,
+            );
+            if (!humidityTargetSent && humidityNumberId && hass?.services?.number?.set_value) {
+              try {
+                await hass.callService("number", "set_value", { entity_id: humidityNumberId, value: next });
+                humidityTargetSent = true;
+              } catch (err) {
+                console.warn("Dyson Remote: number.set_value (humidity stepper) failed", err);
+              }
+            }
+            if (!humidityTargetSent) {
               console.warn(
                 "Dyson Remote: No humidity target service available for",
                 entityId,
-                "(tried humidifier.set_humidity and related climate entity)",
+                "(tried climate / humidifier / number.set_value)",
               );
             }
           } else {
@@ -1668,6 +2083,38 @@ class DysonRemoteCardEditor extends HTMLElement {
         },
       },
       {
+        name: "climate_entity",
+        selector: {
+          entity: {
+            domain: ["climate"],
+          },
+        },
+      },
+      {
+        name: "humidity_auto_entity",
+        selector: {
+          entity: {
+            domain: ["select", "switch"],
+          },
+        },
+      },
+      {
+        name: "humidifier_entity",
+        selector: {
+          entity: {
+            domain: ["humidifier"],
+          },
+        },
+      },
+      {
+        name: "humidity_target_entity",
+        selector: {
+          entity: {
+            domain: ["number"],
+          },
+        },
+      },
+      {
         name: "show_temperature_header",
         selector: { boolean: {} },
       },
@@ -1688,6 +2135,10 @@ class DysonRemoteCardEditor extends HTMLElement {
       entity: "",
       title: "",
       oscillation_select_entity: "",
+      climate_entity: "",
+      humidity_auto_entity: "",
+      humidifier_entity: "",
+      humidity_target_entity: "",
       show_temperature_header: true,
       show_air_quality_header: false,
       mushroom_shell: true,
@@ -1716,6 +2167,22 @@ class DysonRemoteCardEditor extends HTMLElement {
       typeof normalized.oscillation_select_entity === "string" ? normalized.oscillation_select_entity.trim() : "";
     if (trimmedOscSel) normalized.oscillation_select_entity = trimmedOscSel;
     else delete normalized.oscillation_select_entity;
+    const trimmedClimate =
+      typeof normalized.climate_entity === "string" ? normalized.climate_entity.trim() : "";
+    if (trimmedClimate) normalized.climate_entity = trimmedClimate;
+    else delete normalized.climate_entity;
+    const trimmedHumAuto =
+      typeof normalized.humidity_auto_entity === "string" ? normalized.humidity_auto_entity.trim() : "";
+    if (trimmedHumAuto) normalized.humidity_auto_entity = trimmedHumAuto;
+    else delete normalized.humidity_auto_entity;
+    const trimmedHumidifier =
+      typeof normalized.humidifier_entity === "string" ? normalized.humidifier_entity.trim() : "";
+    if (trimmedHumidifier) normalized.humidifier_entity = trimmedHumidifier;
+    else delete normalized.humidifier_entity;
+    const trimmedHumTarget =
+      typeof normalized.humidity_target_entity === "string" ? normalized.humidity_target_entity.trim() : "";
+    if (trimmedHumTarget) normalized.humidity_target_entity = trimmedHumTarget;
+    else delete normalized.humidity_target_entity;
     this._config = { ...normalized };
     this.dispatchEvent(
       new CustomEvent("config-changed", {
@@ -1837,6 +2304,10 @@ class DysonRemoteCardEditor extends HTMLElement {
       form.data = {
         entity: this._config.entity || "",
         oscillation_select_entity: this._config.oscillation_select_entity || "",
+        climate_entity: this._config.climate_entity || "",
+        humidity_auto_entity: this._config.humidity_auto_entity || "",
+        humidifier_entity: this._config.humidifier_entity || "",
+        humidity_target_entity: this._config.humidity_target_entity || "",
         show_temperature_header: this._config.show_temperature_header !== false,
         show_air_quality_header: this._config.show_air_quality_header === true,
         ...airSubsectionFormValues(this._config),
@@ -1846,6 +2317,10 @@ class DysonRemoteCardEditor extends HTMLElement {
       form.computeLabel = (schema) => {
         if (schema.name === "entity") return "Entity";
         if (schema.name === "oscillation_select_entity") return "Oscillation select";
+        if (schema.name === "climate_entity") return "Paired climate (optional)";
+        if (schema.name === "humidity_auto_entity") return "Humidity auto entity (optional)";
+        if (schema.name === "humidifier_entity") return "Paired humidifier (optional)";
+        if (schema.name === "humidity_target_entity") return "Humidity target number (optional)";
         if (schema.name === "show_temperature_header") return "Show temperature header";
         if (schema.name === "show_air_quality_header") return "Show air quality header";
         if (schema.name === "show_air_quality_category") return "Show category";
@@ -1857,6 +2332,18 @@ class DysonRemoteCardEditor extends HTMLElement {
       form.computeHelper = (schema) => {
         if (schema.name === "oscillation_select_entity") {
           return "Optional.";
+        }
+        if (schema.name === "climate_entity") {
+          return "When fan and climate entity ids differ (e.g. some Dyson humidifiers), set the humidifier climate entity here.";
+        }
+        if (schema.name === "humidity_auto_entity") {
+          return "If Auto humidify does nothing, pick the select or switch that toggles auto target humidity for this device (when climate.set_humidity has no humidity_auto field).";
+        }
+        if (schema.name === "humidifier_entity") {
+          return "When the fan entity id does not match humidifier.* on the device, set the real humidifier entity here.";
+        }
+        if (schema.name === "humidity_target_entity") {
+          return "If +/- does nothing, pick the number entity that sets target humidity (some integrations use this instead of climate).";
         }
         return undefined;
       };

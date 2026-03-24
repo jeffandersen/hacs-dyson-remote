@@ -5,8 +5,19 @@ import {
   adjustTargetTemperature,
   airflowCenterLabel,
   ambientTemperature,
+  climateHasDysonStyleHumidityTarget,
+  humiditySetpointIsAutoTarget,
   coolingDotActive,
+  orderedHumidifierEntityCandidates,
+  resolveHumidifierEntityId,
+  resolvedHumidityTargetNumberEntityId,
   entityIsPowered,
+  humidityRangeIntersect,
+  humidifierAutoHumidifyControlEngaged,
+  humidifierComboMode,
+  humidifierPurifyControlEngaged,
+  inferTargetHumidity,
+  isHumidityEnabled,
   fanLevelFromPercentage,
   findHeatPresetName,
   formatTargetTemperature,
@@ -24,6 +35,9 @@ import {
   oscillationDisplayFromSelect,
   oscillationIsEnabled,
   oscillationPresetLabel,
+  pickHumidifierModeForAutoToggle,
+  pickSelectOptionHumidityAuto,
+  resolvedHumidityAutoToggleEntityId,
   snapTemperatureToStep,
   temperatureStepAndBounds,
 } from "../src/dyson-logic.js";
@@ -42,6 +56,8 @@ test("isAutoModeActive", () => {
   assert.equal(isAutoModeActive({ auto_mode: true }), true);
   assert.equal(isAutoModeActive({ preset_mode: "Auto" }), true);
   assert.equal(isAutoModeActive({ preset_mode: "Manual" }), false);
+  assert.equal(isAutoModeActive({ fan_speed_setting: "Auto" }), true);
+  assert.equal(isAutoModeActive({ fan_speed_setting: "  auto  " }), true);
 });
 
 test("isHeatActive uses heating_mode, heating_enabled, and preset", () => {
@@ -49,6 +65,156 @@ test("isHeatActive uses heating_mode, heating_enabled, and preset", () => {
   assert.equal(isHeatActive({ heating_enabled: true }), true);
   assert.equal(isHeatActive({ preset_modes: ["Heat"], preset_mode: "Heat" }), true);
   assert.equal(isHeatActive({ heating_mode: "OFF", heating_enabled: false, preset_mode: "Manual" }), false);
+});
+
+test("humidifierPurifyControlEngaged follows climate hvac_mode and fan auto airflow", () => {
+  assert.equal(humidifierPurifyControlEngaged({ preset_mode: "Manual" }, { hvac_mode: "humidify" }), false);
+  assert.equal(humidifierPurifyControlEngaged({ preset_mode: "Manual" }, { hvac_mode: "fan_only" }), false);
+  assert.equal(humidifierPurifyControlEngaged({ preset_mode: "Auto" }, { hvac_mode: "fan_only" }), true);
+  assert.equal(humidifierPurifyControlEngaged({ auto_mode: true }, { hvac_mode: "fan_only" }), true);
+  assert.equal(humidifierPurifyControlEngaged({ preset_mode: "Manual" }, { hvac_mode: "off" }), false);
+});
+
+test("humidifierAutoHumidifyControlEngaged follows climate hvac_mode", () => {
+  assert.equal(humidifierAutoHumidifyControlEngaged({ preset_mode: "Auto" }, { hvac_mode: "humidify" }), true);
+  assert.equal(humidifierAutoHumidifyControlEngaged({ auto_mode: true }, { hvac_mode: "fan_only" }), false);
+  assert.equal(humidifierAutoHumidifyControlEngaged({ preset_mode: "Manual" }, { hvac_mode: "fan_only" }), false);
+});
+
+test("humidifierAutoHumidifyControlEngaged uses Dyson climate humidity_auto", () => {
+  assert.equal(humidifierAutoHumidifyControlEngaged({}, { hvac_mode: "fan_only", humidity_auto: "ON" }), true);
+  assert.equal(humidifierAutoHumidifyControlEngaged({}, { humidity_auto: true }), true);
+  assert.equal(humidifierAutoHumidifyControlEngaged({}, { humidity_auto: "OFF", hvac_mode: "fan_only" }), false);
+});
+
+test("humidifierAutoHumidifyControlEngaged treats paired humidifier mode auto as engaged", () => {
+  assert.equal(
+    humidifierAutoHumidifyControlEngaged(
+      { preset_mode: "Manual" },
+      { humidity_auto: "OFF", hvac_mode: "fan_only" },
+      { mode: "auto" },
+    ),
+    true,
+  );
+});
+
+test("humidityRangeIntersect tightens max when climate is stricter than humidifier", () => {
+  const r = humidityRangeIntersect([
+    { min_humidity: 30, max_humidity: 50 },
+    { min_humidity: 30, max_humidity: 70 },
+  ]);
+  assert.equal(r.min, 30);
+  assert.equal(r.max, 50);
+});
+
+test("pickHumidifierModeForAutoToggle maps hass-dyson normal/auto", () => {
+  assert.equal(pickHumidifierModeForAutoToggle(["normal", "auto"], true), "auto");
+  assert.equal(pickHumidifierModeForAutoToggle(["normal", "auto"], false), "normal");
+});
+
+test("humiditySetpointIsAutoTarget", () => {
+  assert.equal(humiditySetpointIsAutoTarget({ humidity_auto: "ON" }, {}), true);
+  assert.equal(humiditySetpointIsAutoTarget({ humidity_auto: "OFF" }, { mode: "auto" }), true);
+  assert.equal(humiditySetpointIsAutoTarget({ humidity_auto: "OFF" }, { mode: "normal" }), false);
+});
+
+test("climateHasDysonStyleHumidityTarget", () => {
+  assert.equal(climateHasDysonStyleHumidityTarget({ humidity_auto: "OFF" }), true);
+  assert.equal(climateHasDysonStyleHumidityTarget({ target_humidity_formatted: "0050" }), true);
+  assert.equal(climateHasDysonStyleHumidityTarget({ target_humidity: 50, min_humidity: 30 }), false);
+});
+
+test("orderedHumidifierEntityCandidates prefers climate object id", () => {
+  assert.deepEqual(
+    orderedHumidifierEntityCandidates("fan.a", "climate.b"),
+    ["humidifier.b", "humidifier.a"],
+  );
+});
+
+test("resolveHumidifierEntityId finds humidifier for climate when fan id mismatches", () => {
+  const states = { "humidifier.serial1": { state: "on", attributes: {} } };
+  assert.equal(resolveHumidifierEntityId(states, "fan.other", "climate.serial1", ""), "humidifier.serial1");
+  assert.equal(resolveHumidifierEntityId(states, "fan.other", null, ""), null);
+});
+
+test("resolvedHumidityTargetNumberEntityId", () => {
+  const states = {
+    "number.dev_target_humidity": { state: "45", attributes: {} },
+    "number.manual": { state: "50", attributes: {} },
+  };
+  assert.equal(
+    resolvedHumidityTargetNumberEntityId(states, "climate.dev", "humidifier.dev", ""),
+    "number.dev_target_humidity",
+  );
+  assert.equal(resolvedHumidityTargetNumberEntityId(states, "climate.dev", null, "number.manual"), "number.manual");
+});
+
+test("pickSelectOptionHumidityAuto", () => {
+  assert.equal(pickSelectOptionHumidityAuto(["off", "on"], true), "on");
+  assert.equal(pickSelectOptionHumidityAuto(["OFF", "ON"], false), "OFF");
+  assert.equal(pickSelectOptionHumidityAuto(["Manual", "Automatic"], true), "Automatic");
+  assert.equal(pickSelectOptionHumidityAuto([], true), null);
+});
+
+test("resolvedHumidityAutoToggleEntityId prefers config and discovers select by object id", () => {
+  const states = {
+    "select.my_override": { state: "on", attributes: {} },
+    "select.dyson_device_humidity_auto": { state: "off", attributes: { options: [] } },
+  };
+  assert.equal(
+    resolvedHumidityAutoToggleEntityId(states, "climate.dyson_device", "select.my_override"),
+    "select.my_override",
+  );
+  assert.equal(resolvedHumidityAutoToggleEntityId(states, "climate.dyson_device", ""), "select.dyson_device_humidity_auto");
+  assert.equal(resolvedHumidityAutoToggleEntityId(states, "climate.other", ""), null);
+});
+
+test("humidifierPurifyControlEngaged on for fan_only + auto fan even when humidity_auto on (Dyson)", () => {
+  assert.equal(
+    humidifierPurifyControlEngaged({ preset_mode: "Auto", auto_mode: true }, { hvac_mode: "fan_only", humidity_auto: "ON" }),
+    true,
+  );
+});
+
+test("isHumidityEnabled treats Dyson humidity_enabled HUMD", () => {
+  assert.equal(isHumidityEnabled({ humidity_enabled: "HUMD" }), true);
+  assert.equal(isHumidityEnabled({ humidity_enabled: "ON" }), true);
+  assert.equal(isHumidityEnabled({ humidity_enabled: "OFF" }), false);
+  assert.equal(isHumidityEnabled({ humidity_enabled: "OFF", target_humidity: 70, target_humidity_formatted: "0070" }), false);
+});
+
+test("inferTargetHumidity reads target_humidity_formatted", () => {
+  assert.equal(inferTargetHumidity({ target_humidity_formatted: "0070" }), 70);
+  assert.equal(inferTargetHumidity({ target_humidity: 55 }), 55);
+  assert.equal(inferTargetHumidity({ humidity: 40 }), 40);
+});
+
+test("humidifierComboMode is false for humidity-only fan attributes", () => {
+  assert.equal(
+    humidifierComboMode("fan.living", null, false, { hvac_modes: ["off", "fan_only"] }),
+    false,
+  );
+});
+
+test("humidifierComboMode when linked humidifier entity exists in HA", () => {
+  assert.equal(humidifierComboMode("fan.living", "humidifier.living", true, {}), true);
+  assert.equal(humidifierComboMode("fan.living", "humidifier.living", false, {}), false);
+});
+
+test("humidifierComboMode when climate exposes humidify", () => {
+  assert.equal(
+    humidifierComboMode("fan.living", null, false, { hvac_modes: ["off", "fan_only", "humidify"] }),
+    true,
+  );
+});
+
+test("humidifierComboMode when climate has Dyson humidity_auto or HUMD", () => {
+  assert.equal(humidifierComboMode("fan.x", null, false, { humidity_auto: "OFF" }), true);
+  assert.equal(humidifierComboMode("fan.x", null, false, { humidity_enabled: "HUMD" }), true);
+});
+
+test("humidifierComboMode for humidifier.* entity", () => {
+  assert.equal(humidifierComboMode("humidifier.living", null, false, {}), true);
 });
 
 test("airflowCenterLabel", () => {
