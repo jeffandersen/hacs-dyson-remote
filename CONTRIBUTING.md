@@ -50,6 +50,25 @@ The harness includes:
 - live controls for `is_on`, auto, heating, oscillation, temperatures, and fan percentage
 - real click handling and a service-call log
 
+## Local deploy to Home Assistant
+
+For quick local testing against a mounted Home Assistant config share:
+
+1. Create `.env` from `.env.example`.
+2. Set `HA_HACS_DIR` to your mounted card directory (for example `/Volumes/config/www/community/hacs-dyson-remote`)
+
+Build + deploy:
+
+```bash
+npm run build:deploy
+```
+
+Other deploy helpers:
+
+```bash
+npm run deploy
+```
+
 ## Release checklist
 
 1. Update docs (`README.md`, `docs/integration-behavior.md` if integration logic changed, and any relevant pages).

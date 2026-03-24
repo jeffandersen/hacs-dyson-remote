@@ -7,7 +7,9 @@
     "build": "rollup -c rollup.config.mjs",
     "test": "node --test",
     "test:integration": "vitest run --config vitest.integration.config.mjs",
-    "dev:harness": "python3 -m http.server 4173"
+    "dev:harness": "python3 -m http.server 4173",
+    "deploy": "bash -lc 'set -a; [ -f .env ] && . ./.env; DEST=\"${HA_HACS_DIR:-$HA_HACS_PATH}\"; [ -n \"$DEST\" ] || { echo \"Set HA_HACS_DIR (or HA_HACS_PATH) in .env\"; exit 1; }; rsync -av \"hacs-dyson-remote.js\" \"$DEST/hacs-dyson-remote.js\" && mkdir -p \"$DEST/dist\" && rsync -av \"dist/hacs-dyson-remote.js\" \"$DEST/dist/hacs-dyson-remote.js\"'",
+    "build:deploy": "npm run build && npm run deploy"
   },
   "devDependencies": {
     "@rollup/plugin-replace": "^6.0.2",
