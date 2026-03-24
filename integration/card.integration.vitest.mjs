@@ -144,6 +144,22 @@ describe("dyson-remote-card integration harness", () => {
     expect(overlay.hidden).toBe(true);
   });
 
+  test("timer overlay highlights nearest preset and shows remaining time", async () => {
+    const hass = createMockHass();
+    hass.states[FAN_ENTITY_ID].attributes.sleep_timer = 29 * 60;
+    const card = createCard(hass);
+    const timerLabel = card.shadowRoot.querySelector('[data-part="timer-label"]');
+    expect(timerLabel.textContent).toBe("29m left");
+    card.shadowRoot.querySelector('button[data-action="timer"]').click();
+    await nextTick();
+    const active = card.shadowRoot.querySelector(".timer-grid .timer-chip.is-active");
+    expect(active).toBeTruthy();
+    expect(active.getAttribute("data-action")).toBe("timer_set_30");
+    const remaining = card.shadowRoot.querySelector('[data-part="timer-remaining"]');
+    expect(remaining.hidden).toBe(false);
+    expect(remaining.textContent).toBe("Remaining: 29m");
+  });
+
   test("stepper layout is vertical (+, readout, -)", () => {
     const card = createCard(createMockHass());
     const col = card.shadowRoot.querySelector('[data-stepper="airflow"] .stepper-col');
@@ -165,11 +181,13 @@ describe("dyson-remote-card integration harness", () => {
     expect(power.classList.contains("is-engaged")).toBe(false);
   });
 
-  test("oscillation + cycles to next preset and calls services", async () => {
+  test("oscillation overlay selection calls services for preset angle", async () => {
     const hass = createMockHass();
     const card = createCard(hass);
-    const plus = card.shadowRoot.querySelector('button[data-action="osc_plus"]');
-    plus.click();
+    card.shadowRoot.querySelector('[data-stepper="oscillation"]').click();
+    await nextTick();
+    const option = card.shadowRoot.querySelector('button[data-action^="osc_choice_90"]');
+    option.click();
     await nextTick();
 
     const hasSetAngle = hass.__calls.some((c) => c.domain === "dyson" && c.service === "set_angle");
@@ -178,6 +196,7 @@ describe("dyson-remote-card integration harness", () => {
     );
     expect(hasSetAngle).toBe(true);
     expect(hasOscillateOn).toBe(true);
+    expect(card.shadowRoot.querySelector('[data-part="osc-overlay"]').hidden).toBe(true);
   });
 
   test("oscillation uses select.select_option when select.<fan>_oscillation exists", async () => {
@@ -190,17 +209,20 @@ describe("dyson-remote-card integration harness", () => {
       },
     };
     const card = createCard(hass);
-    const plus = card.shadowRoot.querySelector('button[data-action="osc_plus"]');
-    plus.click();
+    card.shadowRoot.querySelector('[data-stepper="oscillation"]').click();
+    await nextTick();
+    const option = card.shadowRoot.querySelector('button[data-action^="osc_choice_90"]');
+    option.click();
     await nextTick();
 
     const selectCall = hass.__calls.find((c) => c.domain === "select" && c.service === "select_option");
     expect(selectCall).toBeTruthy();
     expect(selectCall.data.entity_id).toBe(selectId);
-    expect(selectCall.data.option).toBe("45°");
+    expect(selectCall.data.option).toBe("90°");
 
     const hasSetAngle = hass.__calls.some((c) => c.domain === "dyson" && c.service === "set_angle");
     expect(hasSetAngle).toBe(false);
+    expect(card.shadowRoot.querySelector('[data-part="osc-overlay"]').hidden).toBe(true);
   });
 
   test("oscillation readout uses select.oscillation_enabled when fan attrs disagree", () => {
@@ -237,6 +259,42 @@ describe("dyson-remote-card integration harness", () => {
     const card = createCard(hass);
     const oscMid = card.shadowRoot.querySelector('[data-part="osc-mid"]');
     expect(oscMid.textContent).toBe("OFF");
+  });
+
+  test("oscillation overlay renders device-specific options from select", async () => {
+    const selectId = "select.dyson_device_oscillation";
+    const hass = createMockHass();
+    hass.states[selectId] = {
+      state: "Breeze",
+      attributes: {
+        options: ["OFF", "45°", "90°", "Breeze"],
+      },
+    };
+    const card = createCard(hass);
+    card.shadowRoot.querySelector('[data-stepper="oscillation"]').click();
+    await nextTick();
+    const labels = [...card.shadowRoot.querySelectorAll('[data-part="osc-options"] .osc-chip')].map((el) =>
+      el.textContent.trim(),
+    );
+    expect(labels).toEqual(["OFF", "45°", "90°", "Breeze"]);
+    expect(labels.includes("Custom")).toBe(false);
+  });
+
+  test("oscillation overlay highlights currently selected option", async () => {
+    const selectId = "select.dyson_device_oscillation";
+    const hass = createMockHass();
+    hass.states[selectId] = {
+      state: "90°",
+      attributes: {
+        options: ["OFF", "45°", "90°", "180°"],
+      },
+    };
+    const card = createCard(hass);
+    card.shadowRoot.querySelector('[data-stepper="oscillation"]').click();
+    await nextTick();
+    const active = card.shadowRoot.querySelector('[data-part="osc-options"] .osc-chip.is-active');
+    expect(active).toBeTruthy();
+    expect(active.textContent.trim()).toBe("90°");
   });
 
   test("oscillation select auto-discovery supports non-default select id suffixes", () => {
@@ -1056,7 +1114,9 @@ describe("dyson-remote-card integration harness", () => {
   test("oscillation action does not send oscillating via fan.turn_on", async () => {
     const hass = createMockHass();
     const card = createCard(hass);
-    const osc = card.shadowRoot.querySelector('button[data-action="osc_plus"]');
+    card.shadowRoot.querySelector('[data-stepper="oscillation"]').click();
+    await nextTick();
+    const osc = card.shadowRoot.querySelector('button[data-action^="osc_choice_90"]');
     osc.click();
     await nextTick();
 

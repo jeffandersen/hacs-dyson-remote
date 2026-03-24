@@ -32,7 +32,6 @@ import {
   isAutoModeActive,
   isHeatActive,
   isNightModeActive,
-  nextOscillationIndex,
   normalizeOscillationPresets,
   normalizePresetModes,
   oscillationDisplayFromSelect,
@@ -234,6 +233,28 @@ function resolvedDeviceId(hass, entityId) {
   const stateDeviceId = hass?.states?.[entityId]?.attributes?.device_id;
   if (typeof stateDeviceId === "string" && stateDeviceId.trim()) return stateDeviceId.trim();
   return "";
+}
+
+function normalizeOscillationChoiceLabel(label) {
+  const s = typeof label === "string" ? label.trim() : "";
+  if (!s) return "";
+  return /^off$/i.test(s) ? "OFF" : s;
+}
+
+function oscillationChoiceDegrees(label) {
+  const s = typeof label === "string" ? label.trim() : "";
+  if (!s) return null;
+  if (/^off$/i.test(s)) return 0;
+  const m = s.match(/(\d+)/);
+  return m ? Number(m[1]) : null;
+}
+
+function oscillationChoiceKey(label, idx) {
+  const base = String(label || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return `osc_choice_${base || "option"}_${idx}`;
 }
 
 function relatedClimateEntityId(hass, fanEntityId) {
@@ -441,6 +462,8 @@ class DysonRemoteCard extends HTMLElement {
     this._optimisticClimateHumidityAutoExpected = null;
     this._optimisticClearTimer = null;
     this._timerOverlayOpen = false;
+    this._oscillationOverlayOpen = false;
+    this._oscillationChoices = [];
   }
 
   set hass(hass) {
@@ -945,7 +968,7 @@ class DysonRemoteCard extends HTMLElement {
         border: 1px solid color-mix(in srgb, var(--divider-color, #666) 70%, transparent);
         box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
         display: grid;
-        grid-template-rows: auto 1fr auto;
+        grid-template-rows: auto auto 1fr auto;
         gap: 12px;
       }
       .timer-overlay[hidden] {
@@ -955,11 +978,21 @@ class DysonRemoteCard extends HTMLElement {
         text-align: center;
         font-size: 1rem;
         opacity: 0.95;
+        grid-row: 1;
+      }
+      .timer-overlay__subtitle {
+        text-align: center;
+        font-size: 0.9rem;
+        color: var(--drc-muted);
+        margin-top: -4px;
+        grid-row: 2;
       }
       .timer-grid {
         display: grid;
         grid-template-columns: repeat(3, minmax(0, 1fr));
         gap: 8px;
+        align-content: start;
+        grid-row: 3;
       }
       .timer-chip {
         border: 1px solid color-mix(in srgb, var(--divider-color, #666) 70%, transparent);
@@ -972,13 +1005,68 @@ class DysonRemoteCard extends HTMLElement {
       .timer-chip:hover {
         background: color-mix(in srgb, var(--drc-surface-on) 55%, #000);
       }
+      .timer-chip.is-active {
+        background: color-mix(in srgb, var(--drc-surface-on) 85%, #000);
+        border-color: color-mix(in srgb, #fff 35%, var(--divider-color, #666));
+        box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.22);
+      }
       .timer-actions {
         display: flex;
-        justify-content: space-between;
         gap: 10px;
+        align-items: center;
+      }
+      .timer-overlay .timer-actions {
+        grid-row: 4;
+        align-self: end;
       }
       .timer-actions .timer-chip {
         flex: 1;
+      }
+      .timer-actions .overlay-close {
+        margin-left: auto;
+        min-width: 96px;
+      }
+      .osc-overlay {
+        position: absolute;
+        inset: 10px;
+        z-index: 8;
+        border-radius: 14px;
+        padding: 16px;
+        background: color-mix(in srgb, #000 86%, var(--ha-card-background, #1c1c1c));
+        border: 1px solid color-mix(in srgb, var(--divider-color, #666) 70%, transparent);
+        box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
+        display: grid;
+        grid-template-rows: auto 1fr auto;
+        gap: 12px;
+      }
+      .osc-overlay[hidden] {
+        display: none !important;
+      }
+      .osc-overlay__title {
+        text-align: center;
+        font-size: 1rem;
+        opacity: 0.95;
+      }
+      .osc-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+      }
+      .osc-chip {
+        border: 1px solid color-mix(in srgb, var(--divider-color, #666) 70%, transparent);
+        border-radius: 999px;
+        background: color-mix(in srgb, var(--drc-surface-idle) 85%, #000);
+        color: var(--drc-text);
+        min-height: 34px;
+        padding: 0 10px;
+      }
+      .osc-chip:hover {
+        background: color-mix(in srgb, var(--drc-surface-on) 55%, #000);
+      }
+      .osc-chip.is-active {
+        background: color-mix(in srgb, var(--drc-surface-on) 85%, #000);
+        border-color: color-mix(in srgb, #fff 35%, var(--divider-color, #666));
+        box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.22);
       }
       .btn-pill {
         width: var(--drc-pill-w);
@@ -997,6 +1085,7 @@ class DysonRemoteCard extends HTMLElement {
       .btn-pill:active { transform: scale(0.98); }
       .stepper-pill {
         width: var(--drc-pill-w);
+        height: var(--drc-pill-h);
         min-height: var(--drc-pill-h);
         border-radius: var(--drc-pill-r);
         background: var(--drc-surface-idle);
@@ -1008,6 +1097,18 @@ class DysonRemoteCard extends HTMLElement {
         gap: 6px;
         box-sizing: border-box;
         transition: background 0.18s ease;
+      }
+      [data-stepper="oscillation"] .stepper-btn--ghost {
+        visibility: hidden;
+        pointer-events: none;
+      }
+      .cell--stepper-osc .label,
+      .cell--stepper-thermal .label,
+      .cell--stepper-airflow .label {
+        min-height: calc(var(--drc-label-size) * 2.4);
+        display: flex;
+        align-items: flex-start;
+        justify-content: center;
       }
       .stepper-col {
         display: flex;
@@ -1189,6 +1290,7 @@ class DysonRemoteCard extends HTMLElement {
           grid-row: auto;
         }
         .timer-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .osc-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       }
     `;
 
@@ -1245,14 +1347,20 @@ class DysonRemoteCard extends HTMLElement {
         </div>
 
         <div class="cell cell--stepper-osc">
-          <div class="stepper-pill" data-stepper="oscillation" aria-label="Oscillation angle">
+          <button
+            type="button"
+            class="stepper-pill"
+            data-stepper="oscillation"
+            data-action="oscillation"
+            aria-label="Oscillation selection"
+          >
             <span class="icon-slot" data-ha-icon="mdi:rotate-360" data-ha-size="26"></span>
             <div class="stepper-col">
-              <button type="button" class="stepper-btn" data-action="osc_plus" aria-label="Next oscillation">+</button>
+              <span class="stepper-btn stepper-btn--ghost" aria-hidden="true">+</span>
               <span class="stepper-readout muted" data-part="osc-mid">OFF</span>
-              <button type="button" class="stepper-btn" data-action="osc_minus" aria-label="Previous oscillation">−</button>
+              <span class="stepper-btn stepper-btn--ghost" aria-hidden="true">−</span>
             </div>
-          </div>
+          </button>
           <div class="label">Oscillation</div>
         </div>
         <div class="cell cell--stepper-thermal">
@@ -1299,6 +1407,7 @@ class DysonRemoteCard extends HTMLElement {
       </div>
       <div class="timer-overlay" data-part="timer-overlay" hidden>
         <div class="timer-overlay__title">Set sleep timer</div>
+        <div class="timer-overlay__subtitle" data-part="timer-remaining" hidden></div>
         <div class="timer-grid">
           <button type="button" class="timer-chip" data-action="timer_set_15">15m</button>
           <button type="button" class="timer-chip" data-action="timer_set_30">30m</button>
@@ -1315,7 +1424,14 @@ class DysonRemoteCard extends HTMLElement {
         </div>
         <div class="timer-actions">
           <button type="button" class="timer-chip" data-action="timer_cancel">Cancel timer</button>
-          <button type="button" class="timer-chip" data-action="timer_close">Close</button>
+          <button type="button" class="timer-chip overlay-close" data-action="timer_close">Close</button>
+        </div>
+      </div>
+      <div class="osc-overlay" data-part="osc-overlay" hidden>
+        <div class="osc-overlay__title">Oscillation</div>
+        <div class="osc-grid" data-part="osc-options"></div>
+        <div class="timer-actions">
+          <button type="button" class="osc-chip overlay-close" data-action="osc_close">Close</button>
         </div>
       </div>
     `;
@@ -1367,8 +1483,7 @@ class DysonRemoteCard extends HTMLElement {
       airflow_minus: ['[data-stepper="airflow"]'],
       heat_plus: ['[data-stepper="thermal"]'],
       heat_minus: ['[data-stepper="thermal"]'],
-      osc_plus: ['[data-stepper="oscillation"]'],
-      osc_minus: ['[data-stepper="oscillation"]'],
+      oscillation: ['[data-stepper="oscillation"]'],
       timer: ['button[data-action="timer"]'],
       night: ['button[data-action="night"]'],
       direction: ['button[data-action="direction"]'],
@@ -1726,9 +1841,32 @@ class DysonRemoteCard extends HTMLElement {
     }
     const timerMinutes = sleepTimerMinutesFromAttrs(attrs);
     const timerLabel = this._rootEl.querySelector('[data-part="timer-label"]');
-    if (timerLabel) timerLabel.textContent = timerMinutes > 0 ? `Timer ${formatSleepTimerLabel(timerMinutes)}` : "Timer";
+    if (timerLabel) timerLabel.textContent = timerMinutes > 0 ? `${formatSleepTimerLabel(timerMinutes)} left` : "Timer";
     const timerOverlay = this._rootEl.querySelector('[data-part="timer-overlay"]');
     if (timerOverlay) timerOverlay.hidden = !this._timerOverlayOpen;
+    const timerRemaining = this._rootEl.querySelector('[data-part="timer-remaining"]');
+    if (timerRemaining) {
+      timerRemaining.hidden = timerMinutes <= 0;
+      timerRemaining.textContent = timerMinutes > 0 ? `Remaining: ${formatSleepTimerLabel(timerMinutes)}` : "";
+    }
+    const timerPresetButtons = this._rootEl.querySelectorAll('button[data-action^="timer_set_"]');
+    let nearestPreset = null;
+    let nearestDiff = Number.POSITIVE_INFINITY;
+    timerPresetButtons.forEach((btn) => {
+      const m = /^timer_set_(\d+)$/.exec(btn.getAttribute("data-action") || "");
+      const preset = m ? Number(m[1]) : 0;
+      if (!(preset > 0) || !(timerMinutes > 0)) return;
+      const diff = Math.abs(preset - timerMinutes);
+      if (diff < nearestDiff || (diff === nearestDiff && (nearestPreset == null || preset < nearestPreset))) {
+        nearestDiff = diff;
+        nearestPreset = preset;
+      }
+    });
+    timerPresetButtons.forEach((btn) => {
+      const m = /^timer_set_(\d+)$/.exec(btn.getAttribute("data-action") || "");
+      const preset = m ? Number(m[1]) : 0;
+      btn.classList.toggle("is-active", timerMinutes > 0 && preset === nearestPreset);
+    });
 
     const airflowMid = this._rootEl.querySelector('[data-part="airflow-mid"]');
     if (airflowMid) {
@@ -1793,6 +1931,25 @@ class DysonRemoteCard extends HTMLElement {
     );
     const oscSelectSt = oscSelectId ? this._hass?.states?.[oscSelectId] : null;
     const oscFromSelect = oscillationDisplayFromSelect(oscSelectSt, presets, realFanAttrs);
+    const oscOptions = Array.isArray(oscSelectSt?.attributes?.options)
+      ? oscSelectSt.attributes.options.filter(
+          (v) => typeof v === "string" && v.trim() && !/^custom$/i.test(v.trim()),
+        )
+      : [];
+    this._oscillationChoices =
+      oscOptions.length > 0
+        ? oscOptions.map((raw, i) => ({
+            key: oscillationChoiceKey(raw, i),
+            label: normalizeOscillationChoiceLabel(raw),
+            option: raw,
+            degrees: oscillationChoiceDegrees(raw),
+          }))
+        : presets.map((deg, i) => ({
+            key: oscillationChoiceKey(oscillationPresetLabel(deg), i),
+            label: oscillationPresetLabel(deg),
+            option: null,
+            degrees: Number(deg),
+          }));
 
     const optOsc = this._optimisticAttrs;
     const oscOptimisticLabel =
@@ -1806,20 +1963,41 @@ class DysonRemoteCard extends HTMLElement {
             }
         : null;
 
+    let currentOscLabel = "OFF";
+    if (oscFromSelect) {
+      currentOscLabel = oscFromSelect.label;
+    } else if (oscOptimisticLabel) {
+      currentOscLabel = oscOptimisticLabel.label;
+    } else {
+      const oi = inferOscillationPresetIndex(attrs, presets);
+      const deg = presets[oi] ?? 0;
+      currentOscLabel = oscillationPresetLabel(deg);
+    }
     const oscMid = this._rootEl.querySelector('[data-part="osc-mid"]');
     if (oscMid) {
-      if (oscFromSelect) {
-        oscMid.textContent = oscFromSelect.label;
-        oscMid.classList.toggle("muted", oscFromSelect.label === "OFF" || oscFromSelect.label === "—");
-      } else if (oscOptimisticLabel) {
-        oscMid.textContent = oscOptimisticLabel.label;
-        oscMid.classList.toggle("muted", oscOptimisticLabel.label === "OFF" || oscOptimisticLabel.label === "—");
-      } else {
-        const oi = inferOscillationPresetIndex(attrs, presets);
-        const deg = presets[oi] ?? 0;
-        oscMid.textContent = oscillationPresetLabel(deg);
-        oscMid.classList.toggle("muted", deg === 0);
-      }
+      oscMid.textContent = currentOscLabel;
+      oscMid.classList.toggle("muted", currentOscLabel === "OFF" || currentOscLabel === "—");
+    }
+    const oscOverlay = this._rootEl.querySelector('[data-part="osc-overlay"]');
+    if (oscOverlay) oscOverlay.hidden = !this._oscillationOverlayOpen;
+    const oscOptionsEl = this._rootEl.querySelector('[data-part="osc-options"]');
+    if (oscOptionsEl) {
+      const overlayCurrentLabel =
+        oscOptions.length > 0 && typeof oscSelectSt?.state === "string" && oscSelectSt.state.trim()
+          ? normalizeOscillationChoiceLabel(oscSelectSt.state)
+          : currentOscLabel;
+      const normalizedCurrent = normalizeOscillationChoiceLabel(overlayCurrentLabel).toLowerCase();
+      const overlayCurrentDegrees = oscillationChoiceDegrees(overlayCurrentLabel);
+      oscOptionsEl.innerHTML = this._oscillationChoices
+        .map((c) => {
+          const isActive =
+            (overlayCurrentDegrees != null &&
+              c.degrees != null &&
+              Number(c.degrees) === Number(overlayCurrentDegrees)) ||
+            c.label.toLowerCase() === normalizedCurrent;
+          return `<button type="button" class="osc-chip${isActive ? " is-active" : ""}" data-action="${c.key}">${c.label}</button>`;
+        })
+        .join("");
     }
 
     this._toggleEngaged('button[data-action="power"]', entityIsPowered(st, attrs));
@@ -2035,6 +2213,7 @@ class DysonRemoteCard extends HTMLElement {
       climateAttrs,
     );
     const domain = entityId.split(".")[0] || "fan";
+    const oscSelectId = resolvedOscillationSelectEntityId(hass, entityId, this._config.oscillation_select_entity);
 
     if (this._pendingActions.has(action)) return;
     this._pendingActions.add(action);
@@ -2056,7 +2235,35 @@ class DysonRemoteCard extends HTMLElement {
         this._updateDynamic();
         return;
       }
+      const oscChoice = this._oscillationChoices.find((c) => c.key === action);
+      if (oscChoice) {
+        if (oscChoice.degrees != null) {
+          this._applyOptimisticPatch({
+            oscillation_enabled: oscChoice.degrees > 0,
+            oscillation_span: oscChoice.degrees,
+          });
+        }
+        await hass.callService(domain, "turn_on", { entity_id: entityId });
+        if (oscChoice.option && oscSelectId && hass?.services?.select?.select_option) {
+          await hass.callService("select", "select_option", { entity_id: oscSelectId, option: oscChoice.option });
+        } else {
+          await this._applyOscillationPreset(hass, domain, entityId, Number(oscChoice.degrees || 0));
+        }
+        this._oscillationOverlayOpen = false;
+        this._updateDynamic();
+        return;
+      }
       switch (action) {
+        case "oscillation": {
+          this._oscillationOverlayOpen = true;
+          this._updateDynamic();
+          break;
+        }
+        case "osc_close": {
+          this._oscillationOverlayOpen = false;
+          this._updateDynamic();
+          break;
+        }
         case "timer": {
           this._timerOverlayOpen = true;
           this._updateDynamic();
@@ -2409,28 +2616,6 @@ class DysonRemoteCard extends HTMLElement {
               );
             }
           }
-          break;
-        }
-        case "osc_minus":
-        case "osc_plus": {
-          const dir = action === "osc_minus" ? -1 : 1;
-          const presets = this._config.oscillation_presets || normalizeOscillationPresets(null);
-          const oscSelId = resolvedOscillationSelectEntityId(hass, entityId, this._config.oscillation_select_entity);
-          const oscSelSt = oscSelId ? hass.states[oscSelId] : null;
-          const oscFromSelect = oscillationDisplayFromSelect(oscSelSt, presets, attrs);
-          const idx =
-            oscFromSelect != null ? oscFromSelect.presetIndex : inferOscillationPresetIndex(attrs, presets);
-          const nextIdx = nextOscillationIndex(idx, dir, presets.length);
-          const nextDeg = presets[nextIdx];
-          this._applyOptimisticPatch(
-            {
-              oscillation_enabled: nextDeg > 0,
-              oscillation_span: nextDeg,
-            },
-            { oscPresetIndex: nextIdx },
-          );
-          await hass.callService(domain, "turn_on", { entity_id: entityId });
-          await this._applyOscillationPreset(hass, domain, entityId, nextDeg);
           break;
         }
         case "night": {
