@@ -157,22 +157,96 @@ export function resolvedHumidityTargetNumberEntityId(
 }
 
 /**
- * Intersect min/max humidity across entities (fan / climate / humidifier). Merging with spread can leave
- * humidifier `max_humidity` (e.g. 70) overriding climate (50) and produce invalid `climate.set_humidity` values.
+ * Bounds for humidity +/- and `climate.set_humidity` clamping.
+ *
+ * **Maximum:** `min(max_humidity)` so a stricter climate cap (e.g. 50) still wins over a humidifier (70).
+ * **Minimum:** `min(min_humidity)` so a humidifier that allows 30% is not blocked by a climate entity that
+ * wrongly advertises 50% as its floor (Dyson-style targets are often 30–70 plus Off / Auto).
+ *
+ * **Step:** largest positive `target_humidity_step` / `humidity_step` among attrs so 10% increments win over 1.
  */
 export function humidityRangeIntersect(attrObjects) {
   const list = Array.isArray(attrObjects) ? attrObjects.filter((a) => a && typeof a === "object") : [];
   const mins = [];
   const maxs = [];
+  const steps = [];
   for (const a of list) {
     if (typeof a.min_humidity === "number" && Number.isFinite(a.min_humidity)) mins.push(a.min_humidity);
     if (typeof a.max_humidity === "number" && Number.isFinite(a.max_humidity)) maxs.push(a.max_humidity);
+    const st = a.target_humidity_step ?? a.humidity_step;
+    if (typeof st === "number" && Number.isFinite(st) && st > 0) steps.push(st);
   }
-  const minRaw = mins.length ? Math.max(...mins) : 30;
+  const minRaw = mins.length ? Math.min(...mins) : 30;
   const maxRaw = maxs.length ? Math.min(...maxs) : 70;
+  const stepRaw = steps.length ? Math.max(...steps) : 1;
   const lo = Math.min(minRaw, maxRaw);
   const hi = Math.max(minRaw, maxRaw);
-  return { min: lo, max: hi, step: 1 };
+  return { min: lo, max: hi, step: Math.max(1, stepRaw) };
+}
+
+/**
+ * Stepper bounds for humidity +/−. When a humidifier entity exists with an explicit
+ * writable range, its min/max take priority — the climate entity's range may be narrower
+ * (display-only or device-level clamping) and would incorrectly cap the stepper.
+ *
+ * Step size: the humidifier entity's step is checked first, then an inference from its
+ * range. Dyson devices typically only accept multiples of 10 (30,40,50,60,70) but HA
+ * may report `target_humidity_step: 1` on the climate entity. When the humidifier range
+ * divides cleanly by 10 and the span is short (≤100 / step gives ≤10 positions), use 10;
+ * same for 5. This avoids sending unsupported values that can crash device firmware.
+ */
+export function humidityStepperBounds(fanAttrs, climateAttrs, humidifierAttrs) {
+  const all = [fanAttrs, climateAttrs, humidifierAttrs].filter(Boolean);
+  const { min: iMin, max: iMax, step: intersectedStep } = humidityRangeIntersect(all);
+  const h = humidifierAttrs || {};
+  if (typeof h.min_humidity === "number" && typeof h.max_humidity === "number") {
+    const lo = Math.min(h.min_humidity, h.max_humidity);
+    const hi = Math.max(h.min_humidity, h.max_humidity);
+    const step = inferHumidifierStep(h, lo, hi, intersectedStep);
+    return { min: lo, max: hi, step };
+  }
+  return { min: iMin, max: iMax, step: intersectedStep };
+}
+
+/**
+ * Pick the best step for the humidifier entity. Prefers an explicit attribute, then
+ * infers from the range (Dyson humidifiers use multiples of 10 but HA may not expose
+ * a step attribute on the humidifier entity).
+ */
+function inferHumidifierStep(humidifierAttrs, min, max, fallbackStep) {
+  const explicit = humidifierAttrs.target_humidity_step ?? humidifierAttrs.humidity_step;
+  if (typeof explicit === "number" && Number.isFinite(explicit) && explicit > 0) {
+    return Math.max(1, explicit);
+  }
+  const span = max - min;
+  if (span > 0) {
+    for (const candidate of [10, 5]) {
+      if (span % candidate === 0 && span / candidate <= 10) return candidate;
+    }
+  }
+  return Math.max(1, fallbackStep);
+}
+
+/** Snap a target % to the device's humidity step grid (from `min`, usually 30 with step 10). */
+export function snapTargetHumidityToStep(value, min, max, step) {
+  const s = Math.max(1, Number(step) || 1);
+  const lo = Math.min(min, max);
+  const hi = Math.max(min, max);
+  if (value == null || !Number.isFinite(Number(value))) return lo;
+  const v = Math.round(Number(value));
+  const k = Math.round((v - lo) / s);
+  const snapped = lo + k * s;
+  return Math.max(lo, Math.min(hi, snapped));
+}
+
+/** One +/- step on the humidity grid after values are snapped. */
+export function adjustTargetHumidityByStep(snapped, dir, min, max, step) {
+  const s = Math.max(1, Number(step) || 1);
+  const lo = Math.min(min, max);
+  const hi = Math.max(min, max);
+  const delta = dir > 0 ? s : -s;
+  const next = snapped + delta;
+  return Math.max(lo, Math.min(hi, next));
 }
 
 /** Map humidifier `available_modes` to the mode string for auto vs manual target humidity (hass-dyson: normal / auto). */
@@ -282,6 +356,42 @@ export function inferTargetHumidity(attrs) {
     return a.humidity;
   }
   return null;
+}
+
+/**
+ * True when merged entity attributes indicate the setpoint has caught up to `expected` (rounded).
+ * Used to clear optimistic UI after `set_humidity`.
+ *
+ * Dyson-style entities often expose both `target_humidity` (setpoint) and `humidity` (current
+ * reading). If we treated any field matching `expected` as success, ambient `humidity` could
+ * equal the new setpoint while `target_humidity` was still stale — reconcile would drop the
+ * overlay and `inferTargetHumidity` would keep showing the old target (UI bounce).
+ *
+ * So: when numeric `target_humidity` is present, only that and `target_humidity_formatted` can
+ * satisfy a match; raw `humidity` is ignored unless there is no numeric target (setpoint may live
+ * only in `humidity` on some entities).
+ */
+export function targetHumidityMatchesExpected(attrs, expected) {
+  if (typeof expected !== "number" || !Number.isFinite(expected)) return false;
+  const want = Math.round(expected);
+  const a = attrs || {};
+  const hasNumericTarget = typeof a.target_humidity === "number" && Number.isFinite(a.target_humidity);
+  if (hasNumericTarget && Math.round(a.target_humidity) === want) return true;
+  const formatted = a.target_humidity_formatted;
+  if (typeof formatted === "string") {
+    const digits = formatted.replace(/\D/g, "");
+    if (digits.length) {
+      const n = parseInt(digits, 10);
+      if (Number.isFinite(n)) {
+        const parsed = n > 100 ? Math.min(100, Math.round(n / 100)) : Math.min(100, n);
+        if (parsed === want) return true;
+      }
+    }
+  }
+  if (!hasNumericTarget && typeof a.humidity === "number" && Number.isFinite(a.humidity)) {
+    return Math.round(a.humidity) === want;
+  }
+  return false;
 }
 
 /**

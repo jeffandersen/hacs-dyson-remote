@@ -635,7 +635,7 @@ describe("dyson-remote-card integration harness", () => {
     expect(humCalls.length).toBe(0);
   });
 
-  test("humidity +/- calls humidifier.set_humidity when humidifier entity exists", async () => {
+  test("humidity +/- calls humidifier.set_humidity when humidifier entity exists (step inferred as 10)", async () => {
     const hass = createMockHass({
       states: {
         [FAN_ENTITY_ID]: {
@@ -667,10 +667,10 @@ describe("dyson-remote-card integration harness", () => {
       (c) => c.domain === "humidifier" && c.service === "set_humidity" && c.data.entity_id === "humidifier.dyson_device",
     );
     expect(humidifierCall).toBeTruthy();
-    expect(humidifierCall.data.humidity).toBe(41);
+    expect(humidifierCall.data.humidity).toBe(50);
   });
 
-  test("humidity +/- uses climate.set_humidity first when climate has Dyson humidity attributes", async () => {
+  test("humidity +/- prefers humidifier.set_humidity over climate when both exist", async () => {
     const hass = createMockHass({
       states: {
         [FAN_ENTITY_ID]: {
@@ -710,15 +710,13 @@ describe("dyson-remote-card integration harness", () => {
     plus.click();
     await nextTick();
 
-    const climateCall = hass.__calls.find(
-      (c) => c.domain === "climate" && c.service === "set_humidity" && c.data.entity_id === CLIMATE_ENTITY_ID,
+    const humidifierCall = hass.__calls.find(
+      (c) => c.domain === "humidifier" && c.service === "set_humidity" && c.data.entity_id === "humidifier.dyson_device",
     );
-    expect(climateCall).toBeTruthy();
-    expect(climateCall.data.humidity).toBe(41);
-    const humidifierCalls = hass.__calls.filter((c) => c.domain === "humidifier" && c.service === "set_humidity");
-    expect(humidifierCalls.length).toBe(1);
-    expect(humidifierCalls[0].data.entity_id).toBe("humidifier.dyson_device");
-    expect(humidifierCalls[0].data.humidity).toBe(41);
+    expect(humidifierCall).toBeTruthy();
+    expect(humidifierCall.data.humidity).toBe(50);
+    const climateCalls = hass.__calls.filter((c) => c.domain === "climate" && c.service === "set_humidity");
+    expect(climateCalls.length).toBe(0);
   });
 
   test("humidity +/- reaches humidifier matched to climate when fan entity id differs", async () => {
@@ -761,10 +759,12 @@ describe("dyson-remote-card integration harness", () => {
       (c) => c.domain === "humidifier" && c.service === "set_humidity" && c.data.entity_id === "humidifier.dyson_device",
     );
     expect(humidifierCall).toBeTruthy();
-    expect(humidifierCall.data.humidity).toBe(41);
+    expect(humidifierCall.data.humidity).toBe(50);
+    const climateCalls = hass.__calls.filter((c) => c.domain === "climate" && c.service === "set_humidity");
+    expect(climateCalls.length).toBe(0);
   });
 
-  test("humidity + caps at intersected max when humidifier allows higher than climate", async () => {
+  test("humidity + uses humidifier range (not climate) so 50 → 60 when humidifier allows 70", async () => {
     const hass = createMockHass({
       states: {
         [FAN_ENTITY_ID]: {
@@ -804,14 +804,14 @@ describe("dyson-remote-card integration harness", () => {
     plus.click();
     await nextTick();
 
-    const climateCall = hass.__calls.find(
-      (c) => c.domain === "climate" && c.service === "set_humidity" && c.data.entity_id === CLIMATE_ENTITY_ID,
+    const humidifierCall = hass.__calls.find(
+      (c) => c.domain === "humidifier" && c.service === "set_humidity" && c.data.entity_id === "humidifier.dyson_device",
     );
-    expect(climateCall).toBeTruthy();
-    expect(climateCall.data.humidity).toBe(50);
+    expect(humidifierCall).toBeTruthy();
+    expect(humidifierCall.data.humidity).toBe(60);
   });
 
-  test("humidity + with climate as card entity calls climate.turn_on before set_humidity", async () => {
+  test("humidity + with climate as card entity calls climate.turn_on before humidifier.set_humidity", async () => {
     const hass = createMockHass({
       states: {
         [CLIMATE_ENTITY_ID]: {
@@ -841,12 +841,53 @@ describe("dyson-remote-card integration harness", () => {
 
     const turnIdx = hass.__calls.findIndex((c) => c.domain === "climate" && c.service === "turn_on");
     const humIdx = hass.__calls.findIndex(
-      (c) => c.domain === "climate" && c.service === "set_humidity" && c.data.entity_id === CLIMATE_ENTITY_ID,
+      (c) => c.domain === "humidifier" && c.service === "set_humidity" && c.data.entity_id === "humidifier.dyson_device",
     );
     expect(turnIdx).toBeGreaterThanOrEqual(0);
     expect(humIdx).toBeGreaterThanOrEqual(0);
     expect(turnIdx).toBeLessThan(humIdx);
-    expect(hass.__calls[humIdx].data.humidity).toBe(41);
+    expect(hass.__calls[humIdx].data.humidity).toBe(50);
+  });
+
+  test("humidity stepper uses same merge as readout when fan target_humidity overrides climate", async () => {
+    const hass = createMockHass({
+      states: {
+        [FAN_ENTITY_ID]: {
+          state: "on",
+          attributes: {
+            ...createMockHass().states[FAN_ENTITY_ID].attributes,
+            target_humidity: 52,
+            min_humidity: 30,
+            max_humidity: 70,
+          },
+        },
+        [CLIMATE_ENTITY_ID]: {
+          state: "fan_only",
+          attributes: {
+            hvac_modes: ["off", "fan_only"],
+            hvac_mode: "fan_only",
+            min_humidity: 30,
+            max_humidity: 70,
+            target_humidity: 50,
+            humidity_auto: "OFF",
+            humidity_enabled: "HUMD",
+          },
+        },
+        "humidifier.dyson_device": {
+          state: "on",
+          attributes: { min_humidity: 30, max_humidity: 70, humidity: 52 },
+        },
+      },
+    });
+    const card = createCard(hass);
+    expect(card.shadowRoot.querySelector('[data-part="thermal-target"]').textContent).toBe("50%");
+    card.shadowRoot.querySelector('button[data-action="heat_minus"]').click();
+    await nextTick();
+    const humidifierCall = hass.__calls.find(
+      (c) => c.domain === "humidifier" && c.service === "set_humidity" && c.data.entity_id === "humidifier.dyson_device",
+    );
+    expect(humidifierCall).toBeTruthy();
+    expect(humidifierCall.data.humidity).toBe(40);
   });
 
   test("humidity readout shows optimistic step when climate entity is card (no fan state)", async () => {
@@ -876,7 +917,7 @@ describe("dyson-remote-card integration harness", () => {
     const card = createCardWithEntity(hass, CLIMATE_ENTITY_ID);
     card.shadowRoot.querySelector('button[data-action="heat_minus"]').click();
     await nextTick();
-    expect(card.shadowRoot.querySelector('[data-part="thermal-target"]').textContent).toBe("49%");
+    expect(card.shadowRoot.querySelector('[data-part="thermal-target"]').textContent).toBe("40%");
   });
 
   test("humidity readout shows AUTO after auto humidify from climate card", async () => {

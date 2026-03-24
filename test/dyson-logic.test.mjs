@@ -12,11 +12,15 @@ import {
   resolveHumidifierEntityId,
   resolvedHumidityTargetNumberEntityId,
   entityIsPowered,
+  adjustTargetHumidityByStep,
   humidityRangeIntersect,
+  humidityStepperBounds,
+  snapTargetHumidityToStep,
   humidifierAutoHumidifyControlEngaged,
   humidifierComboMode,
   humidifierPurifyControlEngaged,
   inferTargetHumidity,
+  targetHumidityMatchesExpected,
   isHumidityEnabled,
   fanLevelFromPercentage,
   findHeatPresetName,
@@ -107,6 +111,55 @@ test("humidityRangeIntersect tightens max when climate is stricter than humidifi
   assert.equal(r.max, 50);
 });
 
+test("humidityRangeIntersect uses lowest advertised min when entities disagree", () => {
+  const r = humidityRangeIntersect([
+    { min_humidity: 50, max_humidity: 70 },
+    { min_humidity: 30, max_humidity: 70 },
+  ]);
+  assert.equal(r.min, 30);
+  assert.equal(r.max, 70);
+});
+
+test("humidityRangeIntersect picks largest humidity step from attrs", () => {
+  const r = humidityRangeIntersect([
+    { min_humidity: 30, max_humidity: 70, target_humidity_step: 1 },
+    { min_humidity: 30, max_humidity: 70, humidity_step: 10 },
+  ]);
+  assert.equal(r.step, 10);
+});
+
+test("humidityStepperBounds prefers humidifier range and infers step=10 for Dyson 30–70", () => {
+  const fan = { min_humidity: 30, max_humidity: 50 };
+  const climate = { min_humidity: 30, max_humidity: 50, target_humidity_step: 1 };
+  const humidifier = { min_humidity: 30, max_humidity: 70 };
+  const r = humidityStepperBounds(fan, climate, humidifier);
+  assert.equal(r.min, 30);
+  assert.equal(r.max, 70);
+  assert.equal(r.step, 10);
+});
+
+test("humidityStepperBounds uses explicit humidifier step when present", () => {
+  const humidifier = { min_humidity: 30, max_humidity: 70, target_humidity_step: 5 };
+  const r = humidityStepperBounds(null, null, humidifier);
+  assert.equal(r.step, 5);
+});
+
+test("humidityStepperBounds falls back to intersection without humidifier", () => {
+  const fan = { min_humidity: 30, max_humidity: 50 };
+  const climate = { min_humidity: 30, max_humidity: 50, target_humidity_step: 1 };
+  const r = humidityStepperBounds(fan, climate, null);
+  assert.equal(r.min, 30);
+  assert.equal(r.max, 50);
+  assert.equal(r.step, 1);
+});
+
+test("snapTargetHumidityToStep and adjustTargetHumidityByStep", () => {
+  assert.equal(snapTargetHumidityToStep(48, 30, 70, 10), 50);
+  assert.equal(snapTargetHumidityToStep(null, 30, 70, 10), 30);
+  assert.equal(adjustTargetHumidityByStep(50, -1, 30, 70, 10), 40);
+  assert.equal(adjustTargetHumidityByStep(30, -1, 30, 70, 10), 30);
+});
+
 test("pickHumidifierModeForAutoToggle maps hass-dyson normal/auto", () => {
   assert.equal(pickHumidifierModeForAutoToggle(["normal", "auto"], true), "auto");
   assert.equal(pickHumidifierModeForAutoToggle(["normal", "auto"], false), "normal");
@@ -187,6 +240,19 @@ test("inferTargetHumidity reads target_humidity_formatted", () => {
   assert.equal(inferTargetHumidity({ target_humidity_formatted: "0070" }), 70);
   assert.equal(inferTargetHumidity({ target_humidity: 55 }), 55);
   assert.equal(inferTargetHumidity({ humidity: 40 }), 40);
+});
+
+test("targetHumidityMatchesExpected ignores raw humidity when numeric target disagrees (ambient vs setpoint)", () => {
+  assert.equal(
+    targetHumidityMatchesExpected({ target_humidity: 50, humidity: 49 }, 49),
+    false,
+  );
+  assert.equal(targetHumidityMatchesExpected({ target_humidity: 49, humidity: 45 }, 49), true);
+  assert.equal(targetHumidityMatchesExpected({ target_humidity: 50, humidity: 48 }, 49), false);
+});
+
+test("targetHumidityMatchesExpected reads formatted setpoint", () => {
+  assert.equal(targetHumidityMatchesExpected({ target_humidity_formatted: "0049" }, 49), true);
 });
 
 test("humidifierComboMode is false for humidity-only fan attributes", () => {
