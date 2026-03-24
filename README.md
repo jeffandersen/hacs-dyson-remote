@@ -66,6 +66,9 @@ mushroom_shell: true
 oscillation_presets: [0, 45, 90, 180, 350]
 # Optional: only if auto-discovery cannot find your oscillation select (rare)
 oscillation_select_entity: select.dyson_zz7_ca_mja1790a_oscillation
+# Optional: humidity target step (integer %) and write path if your integration needs it
+# humidity_step: 10
+# humidity_write: auto   # auto | humidifier | climate
 ```
 
 `title` is optional. If omitted or blank, the title row is hidden (no fallback title is shown).
@@ -88,7 +91,7 @@ This card now includes a visual config editor, so Home Assistant should no longe
 | Cooling | Forces cooling/fan-only behavior where supported (integration-dependent) |
 | Auto mode | Toggles Auto/Manual when those presets exist |
 | Airflow `+/-` | Shows app-style speed levels (**OFF, 1..10**) and maps them to fan percentage internally |
-| Heating/Humidity `+/-` | One thermal stepper: target temperature for normal fans, or target humidity when combo mode is detected (linked **`humidifier.*`**, **`humidify`** in climate **`hvac_modes`**, or **`humidifier.*`** entity). Humidity uses the **lowest** `min_humidity` and **tightest** `max_humidity` across fan/climate/humidifier (so a climate floor of 50 does not block 30–40% when the humidifier allows it), honors **`target_humidity_step`** / **`humidity_step`** when present (e.g. 10%), **−** from **AUTO** exits auto to a manual %, and **−** at the minimum % turns humidify **Off** (`humidifier.set_mode` / `turn_off` or climate away from **humidify**). |
+| Heating/Humidity `+/-` | One thermal stepper: target temperature for normal fans, or target humidity when combo mode is detected (linked **`humidifier.*`**, **`humidify`** in climate **`hvac_modes`**, or **`humidifier.*`** entity). Humidity range prefers the paired **humidifier** `min_humidity` / `max_humidity` when present; step is inferred (e.g. 10% grids on Dyson humidifiers) or overridden with optional **`humidity_step`**. Target writes use **`humidifier.set_humidity`** first by default, then climate / **`number.set_value`**; set **`humidity_write`** to `climate` or `humidifier` if your integration needs a fixed path. **−** from **AUTO** exits auto to a manual %; **−** at the minimum % turns humidify **Off** (`humidifier.set_mode` / `turn_off` or climate away from **humidify**). |
 | Oscillation `+/-` | Cycles configured angles; prefers `select.*_oscillation` when present, else `dyson.set_angle` / `fan.oscillate` |
 | Night mode | Toggles night mode when supported |
 

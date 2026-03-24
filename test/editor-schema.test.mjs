@@ -16,6 +16,8 @@ test("editor schema nests optional entity fields in a flattened expandable", () 
     "humidity_auto_entity",
     "humidifier_entity",
     "humidity_target_entity",
+    "humidity_step",
+    "humidity_write",
   ]);
 });
 

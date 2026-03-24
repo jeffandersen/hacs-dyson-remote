@@ -1,5 +1,6 @@
 {
   "name": "hacs-dyson-remote",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,6 +10,7 @@
     "dev:harness": "python3 -m http.server 4173"
   },
   "devDependencies": {
+    "@rollup/plugin-replace": "^6.0.2",
     "happy-dom": "^15.11.7",
     "rollup": "^4.28.1",
     "vitest": "^2.1.8"

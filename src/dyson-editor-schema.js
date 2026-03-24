@@ -72,6 +72,29 @@ export function buildDysonRemoteCardEditorSchema(data) {
             },
           },
         },
+        {
+          name: "humidity_step",
+          selector: {
+            number: {
+              min: 1,
+              max: 50,
+              mode: "box",
+            },
+          },
+        },
+        {
+          name: "humidity_write",
+          selector: {
+            select: {
+              mode: "dropdown",
+              options: [
+                { value: "auto", label: "Auto (humidifier first, then climate)" },
+                { value: "humidifier", label: "Humidifier entity only" },
+                { value: "climate", label: "Climate entity only" },
+              ],
+            },
+          },
+        },
       ],
     },
     {

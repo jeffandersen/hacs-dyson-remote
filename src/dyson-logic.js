@@ -195,17 +195,30 @@ export function humidityRangeIntersect(attrObjects) {
  * divides cleanly by 10 and the span is short (≤100 / step gives ≤10 positions), use 10;
  * same for 5. This avoids sending unsupported values that can crash device firmware.
  */
-export function humidityStepperBounds(fanAttrs, climateAttrs, humidifierAttrs) {
+/**
+ * @param {Record<string, unknown> | null | undefined} fanAttrs
+ * @param {Record<string, unknown> | null | undefined} climateAttrs
+ * @param {Record<string, unknown> | null | undefined} humidifierAttrs
+ * @param {{ humidityStepOverride?: number } | null | undefined} [options]
+ */
+export function humidityStepperBounds(fanAttrs, climateAttrs, humidifierAttrs, options) {
   const all = [fanAttrs, climateAttrs, humidifierAttrs].filter(Boolean);
   const { min: iMin, max: iMax, step: intersectedStep } = humidityRangeIntersect(all);
+  const override = options?.humidityStepOverride;
+  const applyOverride = (step) => {
+    if (typeof override === "number" && Number.isFinite(override) && override > 0) {
+      return Math.max(1, Math.round(override));
+    }
+    return step;
+  };
   const h = humidifierAttrs || {};
   if (typeof h.min_humidity === "number" && typeof h.max_humidity === "number") {
     const lo = Math.min(h.min_humidity, h.max_humidity);
     const hi = Math.max(h.min_humidity, h.max_humidity);
-    const step = inferHumidifierStep(h, lo, hi, intersectedStep);
+    const step = applyOverride(inferHumidifierStep(h, lo, hi, intersectedStep));
     return { min: lo, max: hi, step };
   }
-  return { min: iMin, max: iMax, step: intersectedStep };
+  return { min: iMin, max: iMax, step: applyOverride(intersectedStep) };
 }
 
 /**

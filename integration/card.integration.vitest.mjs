@@ -719,6 +719,55 @@ describe("dyson-remote-card integration harness", () => {
     expect(climateCalls.length).toBe(0);
   });
 
+  test("humidity +/- uses climate only when humidity_write is climate", async () => {
+    const hass = createMockHass({
+      states: {
+        [FAN_ENTITY_ID]: {
+          state: "on",
+          attributes: {
+            is_on: true,
+            target_humidity: 40,
+            humidity_enabled: "ON",
+            min_humidity: 30,
+            max_humidity: 50,
+          },
+        },
+        [CLIMATE_ENTITY_ID]: {
+          state: "fan_only",
+          attributes: {
+            ...(createMockHass().states[CLIMATE_ENTITY_ID]?.attributes || {}),
+            hvac_modes: ["off", "fan_only"],
+            hvac_mode: "fan_only",
+            min_humidity: 30,
+            max_humidity: 50,
+            target_humidity: 40,
+            humidity_auto: "OFF",
+          },
+        },
+        "humidifier.dyson_device": {
+          state: "on",
+          attributes: {
+            min_humidity: 30,
+            max_humidity: 70,
+            humidity: 40,
+          },
+        },
+      },
+    });
+    const card = createCardWithConfig(hass, { entity: FAN_ENTITY_ID, humidity_write: "climate" });
+    const plus = card.shadowRoot.querySelector('button[data-action="heat_plus"]');
+    plus.click();
+    await nextTick();
+
+    const climateCall = hass.__calls.find(
+      (c) => c.domain === "climate" && c.service === "set_humidity" && c.data.entity_id === CLIMATE_ENTITY_ID,
+    );
+    expect(climateCall).toBeTruthy();
+    expect(climateCall.data.humidity).toBe(50);
+    const humidifierCalls = hass.__calls.filter((c) => c.domain === "humidifier" && c.service === "set_humidity");
+    expect(humidifierCalls.length).toBe(0);
+  });
+
   test("humidity +/- reaches humidifier matched to climate when fan entity id differs", async () => {
     const altFan = "fan.renamed_room";
     const hass = createMockHass({

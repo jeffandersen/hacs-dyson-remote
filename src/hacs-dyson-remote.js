@@ -1,6 +1,11 @@
 import { computeAirQualitySummary } from "./air-quality-logic.js";
 import { buildDysonRemoteCardEditorSchema } from "./dyson-editor-schema.js";
 import {
+  buildHumiditySetpointServiceCalls,
+  executeHumiditySetpointCalls,
+  normalizeHumidityWrite,
+} from "./humidity-write-plan.js";
+import {
   adjustFanPercentage,
   adjustTargetTemperature,
   airflowCenterLabel,
@@ -43,7 +48,10 @@ import {
   temperatureStepAndBounds,
 } from "./dyson-logic.js";
 
-const DYSON_REMOTE_BUILD = "2026.03.23.48";
+const _dysonRemoteBuildToken = "__DYSON_CARD_BUILD__";
+const DYSON_REMOTE_BUILD = _dysonRemoteBuildToken.startsWith("__DYSON_")
+  ? "dev"
+  : _dysonRemoteBuildToken;
 
 /** Pairs: editor/form use show_*; YAML may drop false, so we persist off state as hide_*: true. */
 const AIR_SUBSECTION_FLAG_PAIRS = [
@@ -117,6 +125,16 @@ function mergeConfigWithFormAirSubsections(prevConfig, formValue) {
 
 function entityState(hass, entityId) {
   return hass?.states?.[entityId] || null;
+}
+
+/** Optional card `humidity_step` (number or numeric string). */
+function parseConfigHumidityStep(v) {
+  if (typeof v === "number" && Number.isFinite(v) && v > 0) return Math.round(v);
+  if (typeof v === "string" && v.trim()) {
+    const n = Number(v.trim());
+    if (Number.isFinite(n) && n > 0) return Math.round(n);
+  }
+  return undefined;
 }
 
 /** HA rejects unknown `climate.set_humidity` keys; only send `humidity_auto` if the service schema includes it. */
@@ -413,6 +431,8 @@ class DysonRemoteCard extends HTMLElement {
       humidifier_entity: typeof config.humidifier_entity === "string" ? config.humidifier_entity.trim() : "",
       humidity_target_entity:
         typeof config.humidity_target_entity === "string" ? config.humidity_target_entity.trim() : "",
+      humidity_step: parseConfigHumidityStep(config.humidity_step),
+      humidity_write: normalizeHumidityWrite(config.humidity_write),
     };
     this._renderStatic();
     this._updateDynamic();
@@ -1393,6 +1413,13 @@ class DysonRemoteCard extends HTMLElement {
     this._maybeResyncOptimisticClearTimer();
   }
 
+  _humidityStepperBounds(fanAttrs, climateAttrs, humidifierAttrs) {
+    const step = this._config?.humidity_step;
+    const options =
+      typeof step === "number" && Number.isFinite(step) && step > 0 ? { humidityStepOverride: step } : undefined;
+    return humidityStepperBounds(fanAttrs, climateAttrs, humidifierAttrs, options);
+  }
+
   _applyOptimisticPatch(patch, meta = {}) {
     if (!patch || typeof patch !== "object") return;
     this._optimisticAttrs = { ...(this._optimisticAttrs || {}), ...patch };
@@ -1576,7 +1603,7 @@ class DysonRemoteCard extends HTMLElement {
         if (humiditySetpointIsAutoTarget(climateAttrs, humidifierAttrs)) {
           readout = "AUTO";
         } else {
-          const { min: hMin, max: hMax, step: hStep } = humidityStepperBounds(
+          const { min: hMin, max: hMax, step: hStep } = this._humidityStepperBounds(
             realFanAttrs,
             climateAttrs,
             humidifierAttrs,
@@ -1688,9 +1715,9 @@ class DysonRemoteCard extends HTMLElement {
     if (!humiditySetpointIsAutoTarget(climateAttrs, humidifierAttrs)) return false;
 
     const merged = mergedHumidityCardAttrs(attrs, climateAttrs, humidifierAttrs);
-    const { min, max, step } = humidityStepperBounds(attrs, climateAttrs, humidifierAttrs);
+    const { min, max, step } = this._humidityStepperBounds(attrs, climateAttrs, humidifierAttrs);
     const hRaw = inferTargetHumidity(merged);
-    const hum = snapTargetHumidityToStep(hRaw, min, max, step);
+    const hum = snapTargetHumidityToStep(hRaw, min, max, Math.max(1, step));
 
     let handled = false;
     let usedHumidifierModeForAuto = false;
@@ -2130,7 +2157,7 @@ class DysonRemoteCard extends HTMLElement {
               });
               if (exited) break;
             }
-            const { min, max, step } = humidityStepperBounds(attrs, climateAttrs, humidifierAttrs);
+            const { min, max, step } = this._humidityStepperBounds(attrs, climateAttrs, humidifierAttrs);
             const stepSize = Math.max(1, step);
             const dir = action === "heat_minus" ? -1 : 1;
             const baseRaw = inferTargetHumidity(sourceAttrs);
@@ -2164,50 +2191,26 @@ class DysonRemoteCard extends HTMLElement {
                 console.warn("Dyson Remote: climate.turn_on before humidity step failed", err);
               }
             }
-            let humidityTargetSent = false;
-            if (humidifierEntityId && hass?.services?.humidifier?.set_humidity) {
-              try {
-                await hass.callService("humidifier", "set_humidity", { entity_id: humidifierEntityId, humidity: next });
-                humidityTargetSent = true;
-              } catch (err) {
-                console.warn("Dyson Remote: humidifier.set_humidity (humidity stepper) failed", err);
-              }
-            }
-            if (!humidityTargetSent && hass?.services?.humidifier?.set_humidity && domain === "humidifier") {
-              try {
-                await hass.callService("humidifier", "set_humidity", { entity_id: entityId, humidity: next });
-                humidityTargetSent = true;
-              } catch (err) {
-                console.warn("Dyson Remote: humidifier.set_humidity (entity stepper) failed", err);
-              }
-            }
-            if (!humidityTargetSent && climateEntityId && hass?.services?.climate?.set_humidity) {
-              try {
-                await hass.callService("climate", "set_humidity", { entity_id: climateEntityId, humidity: next });
-                humidityTargetSent = true;
-              } catch (err) {
-                console.warn("Dyson Remote: climate.set_humidity (humidity stepper fallback) failed", err);
-              }
-            }
             const humidityNumberId = resolvedHumidityTargetNumberEntityId(
               hass.states,
               climateEntityId,
               humidifierEntityId,
               this._config.humidity_target_entity,
             );
-            if (!humidityTargetSent && humidityNumberId && hass?.services?.number?.set_value) {
-              try {
-                await hass.callService("number", "set_value", { entity_id: humidityNumberId, value: next });
-                humidityTargetSent = true;
-              } catch (err) {
-                console.warn("Dyson Remote: number.set_value (humidity stepper) failed", err);
-              }
-            }
+            const humidityCalls = buildHumiditySetpointServiceCalls(hass, {
+              next,
+              climateEntityId,
+              humidifierEntityId,
+              configuredEntityId: entityId,
+              humidityNumberId,
+              humidityWrite: this._config.humidity_write,
+            });
+            const humidityTargetSent = await executeHumiditySetpointCalls(hass, humidityCalls);
             if (!humidityTargetSent) {
               console.warn(
                 "Dyson Remote: No humidity target service available for",
                 entityId,
-                "(tried humidifier / climate / number.set_value)",
+                "(tried humidifier / climate / number.set_value per humidity_write)",
               );
             }
           } else {
@@ -2309,6 +2312,7 @@ class DysonRemoteCardEditor extends HTMLElement {
       humidity_auto_entity: "",
       humidifier_entity: "",
       humidity_target_entity: "",
+      humidity_write: "auto",
       show_temperature_header: true,
       show_air_quality_header: false,
       mushroom_shell: true,
@@ -2354,6 +2358,23 @@ class DysonRemoteCardEditor extends HTMLElement {
       typeof normalized.humidity_target_entity === "string" ? normalized.humidity_target_entity.trim() : "";
     if (trimmedHumTarget) normalized.humidity_target_entity = trimmedHumTarget;
     else delete normalized.humidity_target_entity;
+    const trimmedHumWrite =
+      typeof normalized.humidity_write === "string" ? normalized.humidity_write.trim().toLowerCase() : "";
+    if (trimmedHumWrite === "humidifier" || trimmedHumWrite === "climate") {
+      normalized.humidity_write = trimmedHumWrite;
+    } else if (trimmedHumWrite === "auto") {
+      normalized.humidity_write = "auto";
+    } else {
+      delete normalized.humidity_write;
+    }
+    if (
+      normalized.humidity_step === "" ||
+      normalized.humidity_step === undefined ||
+      normalized.humidity_step === null ||
+      (typeof normalized.humidity_step === "string" && !String(normalized.humidity_step).trim())
+    ) {
+      delete normalized.humidity_step;
+    }
     this._config = { ...normalized };
     this.dispatchEvent(
       new CustomEvent("config-changed", {

@@ -153,6 +153,12 @@ test("humidityStepperBounds falls back to intersection without humidifier", () =
   assert.equal(r.step, 1);
 });
 
+test("humidityStepperBounds humidityStepOverride wins over inferred step", () => {
+  const humidifier = { min_humidity: 30, max_humidity: 70 };
+  const r = humidityStepperBounds(null, null, humidifier, { humidityStepOverride: 5 });
+  assert.equal(r.step, 5);
+});
+
 test("snapTargetHumidityToStep and adjustTargetHumidityByStep", () => {
   assert.equal(snapTargetHumidityToStep(48, 30, 70, 10), 50);
   assert.equal(snapTargetHumidityToStep(null, 30, 70, 10), 30);
