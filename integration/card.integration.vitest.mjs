@@ -280,6 +280,24 @@ describe("dyson-remote-card integration harness", () => {
     expect(labels.includes("Custom")).toBe(false);
   });
 
+  test("oscillation overlay injects OFF when select options do not include it", async () => {
+    const selectId = "select.dyson_device_oscillation";
+    const hass = createMockHass();
+    hass.states[selectId] = {
+      state: "90°",
+      attributes: {
+        options: ["45°", "90°", "180°", "350°"],
+      },
+    };
+    const card = createCard(hass);
+    card.shadowRoot.querySelector('[data-stepper="oscillation"]').click();
+    await nextTick();
+    const labels = [...card.shadowRoot.querySelectorAll('[data-part="osc-options"] .osc-chip')].map((el) =>
+      el.textContent.trim(),
+    );
+    expect(labels[0]).toBe("OFF");
+  });
+
   test("oscillation overlay highlights currently selected option", async () => {
     const selectId = "select.dyson_device_oscillation";
     const hass = createMockHass();

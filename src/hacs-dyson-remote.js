@@ -1936,14 +1936,20 @@ class DysonRemoteCard extends HTMLElement {
           (v) => typeof v === "string" && v.trim() && !/^custom$/i.test(v.trim()),
         )
       : [];
+    const hasOffOption = oscOptions.some((v) => /^off$/i.test(String(v).trim()));
+    const overlayOptions = hasOffOption ? oscOptions : ["OFF", ...oscOptions];
     this._oscillationChoices =
       oscOptions.length > 0
-        ? oscOptions.map((raw, i) => ({
-            key: oscillationChoiceKey(raw, i),
-            label: normalizeOscillationChoiceLabel(raw),
-            option: raw,
-            degrees: oscillationChoiceDegrees(raw),
-          }))
+        ? overlayOptions.map((raw, i) => {
+            const label = normalizeOscillationChoiceLabel(raw);
+            const isSyntheticOff = !hasOffOption && i === 0 && label === "OFF";
+            return {
+              key: oscillationChoiceKey(raw, i),
+              label,
+              option: isSyntheticOff ? null : raw,
+              degrees: oscillationChoiceDegrees(raw),
+            };
+          })
         : presets.map((deg, i) => ({
             key: oscillationChoiceKey(oscillationPresetLabel(deg), i),
             label: oscillationPresetLabel(deg),
