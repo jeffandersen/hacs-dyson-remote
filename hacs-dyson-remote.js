@@ -1025,7 +1025,7 @@ function isAirflowControlEngaged(st, attrs) {
   return false;
 }
 
-const DYSON_REMOTE_BUILD = "2026.03.23.41";
+const DYSON_REMOTE_BUILD = "2026.03.23.47";
 
 /** Pairs: editor/form use show_*; YAML may drop false, so we persist off state as hide_*: true. */
 const AIR_SUBSECTION_FLAG_PAIRS = [
@@ -1742,11 +1742,38 @@ class DysonRemoteCard extends HTMLElement {
         align-items: center;
         gap: 8px;
       }
-      .cell--span-center {
-        grid-column: 2;
+      /*
+       * Footer row: invisible spacer (col 1) + Night + Direction so auto-placement centers Night even when
+       * @container or other rules drop explicit grid-column (e.g. max-width:345px matching a squeezed host).
+       */
+      .cell--footer-spacer {
+        visibility: hidden;
+        pointer-events: none;
       }
-      .cell--span-right {
-        grid-column: 3;
+      .cell--footer-spacer .btn-circle,
+      .cell--footer-spacer .label {
+        visibility: hidden;
+      }
+      /*
+       * Pin stepper row + combo column swap only when the card is wide enough for three columns.
+       * (Footer rules above apply whenever .grid has three columns — the default before max-width:345px.)
+       */
+      @container (min-width: 346px) {
+        .cell--stepper-osc,
+        .cell--stepper-thermal,
+        .cell--stepper-airflow {
+          grid-row: 2;
+        }
+        /* Fan: columns 1–3 follow DOM (osc | thermal | airflow). Combo: osc | airflow | humidity. */
+        .grid--combo-humid .cell--stepper-osc {
+          grid-column: 1;
+        }
+        .grid--combo-humid .cell--stepper-airflow {
+          grid-column: 2;
+        }
+        .grid--combo-humid .cell--stepper-thermal {
+          grid-column: 3;
+        }
       }
       .label {
         font-size: var(--drc-label-size);
@@ -1997,11 +2024,13 @@ class DysonRemoteCard extends HTMLElement {
         .grid {
           grid-template-columns: repeat(2, 1fr);
         }
-        .cell--span-center {
-          grid-column: 1 / -1;
+        .cell--stepper-osc,
+        .cell--stepper-thermal,
+        .cell--stepper-airflow {
+          grid-row: auto;
         }
-        .cell--span-right {
-          grid-column: auto;
+        .cell--footer-spacer {
+          display: none;
         }
       }
     `;
@@ -2058,29 +2087,7 @@ class DysonRemoteCard extends HTMLElement {
           <div class="label" data-part="auto-label">Auto mode</div>
         </div>
 
-        <div class="cell">
-          <div class="stepper-pill" data-stepper="airflow" aria-label="Airflow speed">
-            <span class="icon-slot" data-ha-icon="mdi:fan" data-ha-size="26"></span>
-            <div class="stepper-col">
-              <button type="button" class="stepper-btn" data-action="airflow_plus" aria-label="Increase airflow">+</button>
-              <span class="stepper-readout" data-part="airflow-mid">AUTO</span>
-              <button type="button" class="stepper-btn" data-action="airflow_minus" aria-label="Decrease airflow">−</button>
-            </div>
-          </div>
-          <div class="label">Airflow speed</div>
-        </div>
-        <div class="cell">
-          <div class="stepper-pill" data-stepper="thermal" data-thermal-mode="temperature" aria-label="Heating target temperature">
-            <span class="icon-slot" data-part="thermal-icon" data-ha-icon="mdi:radiator" data-ha-size="26"></span>
-            <div class="stepper-col">
-              <button type="button" class="stepper-btn" data-action="heat_plus" aria-label="Raise target temperature">+</button>
-              <span class="stepper-readout muted" data-part="thermal-target">—</span>
-              <button type="button" class="stepper-btn" data-action="heat_minus" aria-label="Lower target temperature">−</button>
-            </div>
-          </div>
-          <div class="label" data-part="thermal-label">Heating</div>
-        </div>
-        <div class="cell">
+        <div class="cell cell--stepper-osc">
           <div class="stepper-pill" data-stepper="oscillation" aria-label="Oscillation angle">
             <span class="icon-slot" data-ha-icon="mdi:rotate-360" data-ha-size="26"></span>
             <div class="stepper-col">
@@ -2091,14 +2098,40 @@ class DysonRemoteCard extends HTMLElement {
           </div>
           <div class="label">Oscillation</div>
         </div>
+        <div class="cell cell--stepper-thermal">
+          <div class="stepper-pill" data-stepper="thermal" data-thermal-mode="temperature" aria-label="Heating target temperature">
+            <span class="icon-slot" data-part="thermal-icon" data-ha-icon="mdi:radiator" data-ha-size="26"></span>
+            <div class="stepper-col">
+              <button type="button" class="stepper-btn" data-action="heat_plus" aria-label="Raise target temperature">+</button>
+              <span class="stepper-readout muted" data-part="thermal-target">—</span>
+              <button type="button" class="stepper-btn" data-action="heat_minus" aria-label="Lower target temperature">−</button>
+            </div>
+          </div>
+          <div class="label" data-part="thermal-label">Heating</div>
+        </div>
+        <div class="cell cell--stepper-airflow">
+          <div class="stepper-pill" data-stepper="airflow" aria-label="Airflow speed">
+            <span class="icon-slot" data-ha-icon="mdi:fan" data-ha-size="26"></span>
+            <div class="stepper-col">
+              <button type="button" class="stepper-btn" data-action="airflow_plus" aria-label="Increase airflow">+</button>
+              <span class="stepper-readout" data-part="airflow-mid">AUTO</span>
+              <button type="button" class="stepper-btn" data-action="airflow_minus" aria-label="Decrease airflow">−</button>
+            </div>
+          </div>
+          <div class="label">Airflow speed</div>
+        </div>
 
-        <div class="cell cell--span-center">
+        <div class="cell cell--footer-spacer" aria-hidden="true">
+          <div class="btn-circle"></div>
+          <div class="label"> </div>
+        </div>
+        <div class="cell cell--footer-night">
           <button type="button" class="btn-circle" data-action="night" aria-label="Night mode">
             <span class="icon-slot" data-ha-icon="mdi:weather-night" data-ha-size="28"></span>
           </button>
           <div class="label">Night mode</div>
         </div>
-        <div class="cell cell--span-right">
+        <div class="cell cell--footer-direction">
           <button type="button" class="btn-circle" data-action="direction" aria-label="Airflow direction">
             <span class="icon-slot" data-part="direction-icon" data-ha-icon="mdi:tray-arrow-up" data-ha-size="28"></span>
           </button>
@@ -2375,6 +2408,7 @@ class DysonRemoteCard extends HTMLElement {
       humidifierStateExists,
       climateAttrs,
     );
+    this._rootEl?.querySelector(".grid")?.classList.toggle("grid--combo-humid", humidifierMode);
     /* Same merge as humidity readout: primary entity (+ optimistic) last; avoids humidifier `is_on` masking climate `humidity_enabled: OFF`. */
     const mergedHumidity = humidifierMode ? { ...climateAttrs, ...humidifierAttrs, ...attrs } : null;
 

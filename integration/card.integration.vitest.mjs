@@ -95,6 +95,16 @@ function createCardWithConfig(hass, config) {
 }
 
 describe("dyson-remote-card integration harness", () => {
+  test("footer row uses spacer before night so auto-flow centers night in column 2", () => {
+    const card = createCard(createMockHass());
+    const grid = card.shadowRoot.querySelector(".grid");
+    const cells = [...grid.children].filter((el) => el.classList?.contains("cell"));
+    const iSpacer = cells.findIndex((c) => c.classList.contains("cell--footer-spacer"));
+    const iNight = cells.findIndex((c) => c.classList.contains("cell--footer-night"));
+    expect(iSpacer).toBeGreaterThanOrEqual(0);
+    expect(iNight).toBeGreaterThan(iSpacer);
+  });
+
   test("stepper layout is vertical (+, readout, -)", () => {
     const card = createCard(createMockHass());
     const col = card.shadowRoot.querySelector('[data-stepper="airflow"] .stepper-col');
@@ -405,6 +415,32 @@ describe("dyson-remote-card integration harness", () => {
     expect(coolingCircle.hidden).toBe(true);
     expect(getComputedStyle(coolingCircle).display).toBe("none");
     expect(getComputedStyle(autoHumidifyIcon).display).not.toBe("none");
+  });
+
+  test("main grid uses combo humidifier column-order class only in combo mode", () => {
+    expect(createCard(createMockHass()).shadowRoot.querySelector(".grid")?.classList.contains("grid--combo-humid")).toBe(
+      false,
+    );
+    const hass = createMockHass({
+      states: {
+        [FAN_ENTITY_ID]: {
+          state: "on",
+          attributes: {
+            is_on: true,
+            percentage: 50,
+            humidity_enabled: "ON",
+            target_humidity: 40,
+            min_humidity: 30,
+            max_humidity: 70,
+          },
+        },
+        "humidifier.dyson_device": {
+          state: "on",
+          attributes: { min_humidity: 30, max_humidity: 70, humidity: 40 },
+        },
+      },
+    });
+    expect(createCard(hass).shadowRoot.querySelector(".grid")?.classList.contains("grid--combo-humid")).toBe(true);
   });
 
   test("Auto purify in combo mode sets climate fan_only and fan Auto preset", async () => {

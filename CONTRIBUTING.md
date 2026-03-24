@@ -14,7 +14,7 @@ npm install
 npm run build
 ```
 
-This writes `dist/hacs-dyson-remote.js`, which should be committed for releases so HACS users do not need to build locally.
+This writes **`dist/hacs-dyson-remote.js`** and **`hacs-dyson-remote.js`** at the repo root (HACS `hacs.json` `filename`). Commit both outputs for releases so HACS users do not need to build locally.
 
 ## Test
 
@@ -50,19 +50,9 @@ The harness includes:
 - live controls for `is_on`, auto, heating, oscillation, temperatures, and fan percentage
 - real click handling and a service-call log
 
-## Security scanning
-
-Use Semgrep locally:
-
-```bash
-semgrep scan --config auto .
-```
-
-If you are authenticated to Semgrep Cloud and your workflow expects policy checks, `semgrep ci` can also be used.
-
 ## Release checklist
 
-1. Update docs (`README.md` and any relevant pages).
+1. Update docs (`README.md`, `docs/integration-behavior.md` if integration logic changed, and any relevant pages).
 2. Run `npm test`.
 3. Run `npm run build`.
 4. Commit source changes and updated `dist/hacs-dyson-remote.js`.
