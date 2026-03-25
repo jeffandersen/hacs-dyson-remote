@@ -42,6 +42,7 @@ import {
   pickHumidifierModeForAutoToggle,
   pickSelectOptionHumidityAuto,
   resolvedHumidityAutoToggleEntityId,
+  resolvedNightModeSwitchEntityId,
   snapTemperatureToStep,
   temperatureStepAndBounds,
 } from "../src/dyson-logic.js";
@@ -400,6 +401,42 @@ test("entityIsPowered prefers is_on", () => {
 test("isNightModeActive", () => {
   assert.equal(isNightModeActive({ night_mode: true }), true);
   assert.equal(isNightModeActive({ night_mode: false }), false);
+  assert.equal(isNightModeActive({ night_mode: "ON" }), true);
+  assert.equal(isNightModeActive({ night_mode: "off" }), false);
+  assert.equal(isNightModeActive({ night_mode: "OFF" }), false);
+});
+
+test("resolvedNightModeSwitchEntityId", () => {
+  const deviceId = "dev1";
+  const states = {
+    "fan.my_fan": { state: "on", attributes: {} },
+    "climate.my_fan": { state: "fan_only", attributes: {} },
+    "switch.my_fan_night_mode": { state: "off", attributes: {} },
+  };
+  const entities = {
+    "fan.my_fan": { device_id: deviceId },
+    "switch.my_fan_night_mode": { device_id: deviceId },
+  };
+  assert.equal(
+    resolvedNightModeSwitchEntityId(states, entities, deviceId, "fan.my_fan", "climate.my_fan", ""),
+    "switch.my_fan_night_mode",
+  );
+  assert.equal(
+    resolvedNightModeSwitchEntityId(states, entities, deviceId, "fan.my_fan", "climate.my_fan", "switch.my_fan_night_mode"),
+    "switch.my_fan_night_mode",
+  );
+  const statesNamed = {
+    "fan.x": { state: "on", attributes: {} },
+    "switch.dyson_random": {
+      state: "off",
+      attributes: { friendly_name: "Night mode" },
+    },
+  };
+  const entNamed = {
+    "fan.x": { device_id: "d1" },
+    "switch.dyson_random": { device_id: "d1" },
+  };
+  assert.equal(resolvedNightModeSwitchEntityId(statesNamed, entNamed, "d1", "fan.x", null, ""), "switch.dyson_random");
 });
 
 test("isAirflowControlEngaged", () => {

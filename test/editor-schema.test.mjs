@@ -14,6 +14,7 @@ test("editor schema nests optional entity fields in a flattened expandable", () 
     "oscillation_select_entity",
     "climate_entity",
     "humidity_auto_entity",
+    "night_mode_entity",
     "humidifier_entity",
     "humidity_target_entity",
     "humidity_step",

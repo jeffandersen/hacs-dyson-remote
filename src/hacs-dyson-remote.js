@@ -32,6 +32,7 @@ import {
   isAutoModeActive,
   isHeatActive,
   isNightModeActive,
+  normalizeNightModeValue,
   normalizeOscillationPresets,
   normalizePresetModes,
   oscillationDisplayFromSelect,
@@ -41,6 +42,7 @@ import {
   pickHumidifierModeForAutoToggle,
   pickSelectOptionHumidityAuto,
   resolvedHumidityAutoToggleEntityId,
+  resolvedNightModeSwitchEntityId,
   resolvedHumidityTargetNumberEntityId,
   resolveHumidifierEntityId,
   snapTemperatureToStep,
@@ -255,6 +257,22 @@ function oscillationChoiceKey(label, idx) {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
   return `osc_choice_${base || "option"}_${idx}`;
+}
+
+function clampDysonAngle(angle) {
+  const n = Number(angle);
+  if (!Number.isFinite(n)) return 180;
+  const wrapped = ((Math.round(n) % 360) + 360) % 360;
+  return Math.min(350, wrapped);
+}
+
+function inferPointingAngle(attrs) {
+  const lo = Number(attrs?.angle_low);
+  const hi = Number(attrs?.angle_high);
+  if (Number.isFinite(lo) && Number.isFinite(hi)) {
+    return clampDysonAngle((lo + hi) / 2);
+  }
+  return 180;
 }
 
 function relatedClimateEntityId(hass, fanEntityId) {
@@ -626,7 +644,24 @@ class DysonRemoteCard extends HTMLElement {
     await hass.callService(domain, "oscillate", { entity_id: entityId, oscillating: true });
   }
 
-  async _setNightMode(hass, fanDomain, fanEntityId, enabled) {
+  async _setNightMode(hass, deviceId, fanDomain, fanEntityId, climateEntityId, nightSwitchEntityId, enabled) {
+    if (nightSwitchEntityId) {
+      const svc = enabled ? "turn_on" : "turn_off";
+      if (hass?.services?.switch?.[svc]) {
+        await hass.callService("switch", svc, { entity_id: nightSwitchEntityId });
+        return true;
+      }
+    }
+    if (deviceId) {
+      const hassDyson = hass?.services?.hass_dyson?.set_night_mode;
+      if (hassDyson) {
+        await hass.callService("hass_dyson", "set_night_mode", {
+          device_id: deviceId,
+          night_mode: enabled,
+        });
+        return true;
+      }
+    }
     if (hass?.services?.dyson?.set_night_mode) {
       await hass.callService("dyson", "set_night_mode", {
         entity_id: fanEntityId,
@@ -637,6 +672,20 @@ class DysonRemoteCard extends HTMLElement {
     const fields = hass?.services?.[fanDomain]?.turn_on?.fields || {};
     if (Object.hasOwn(fields, "night_mode")) {
       await hass.callService(fanDomain, "turn_on", { entity_id: fanEntityId, night_mode: enabled });
+      return true;
+    }
+    return false;
+  }
+
+  async _setPointingAngle(hass, entityId, angle) {
+    if (!entityId) return false;
+    const a = clampDysonAngle(angle);
+    if (hass?.services?.dyson?.set_angle) {
+      await hass.callService("dyson", "set_angle", {
+        entity_id: entityId,
+        angle_low: a,
+        angle_high: a,
+      });
       return true;
     }
     return false;
@@ -1047,6 +1096,50 @@ class DysonRemoteCard extends HTMLElement {
         font-size: 1rem;
         opacity: 0.95;
       }
+      .osc-pointing {
+        display: grid;
+        justify-items: center;
+        gap: 8px;
+      }
+      .osc-dial {
+        width: 140px;
+        height: 140px;
+        border-radius: 50%;
+        position: relative;
+        background:
+          radial-gradient(circle at center, rgba(0, 0, 0, 0.55) 0 38%, transparent 39%),
+          radial-gradient(circle at center, rgba(255, 255, 255, 0.08) 0 76%, rgba(255, 255, 255, 0.03) 77% 100%);
+        border: 1px solid color-mix(in srgb, var(--divider-color, #666) 70%, transparent);
+        cursor: crosshair;
+      }
+      .osc-dial-arm {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        width: 2px;
+        height: 48px;
+        transform-origin: 50% 100%;
+        transform: translate(-50%, -100%) rotate(var(--osc-angle, 180deg));
+        background: rgba(255, 255, 255, 0.72);
+      }
+      .osc-dial-knob {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        width: 14px;
+        height: 14px;
+        margin-left: -7px;
+        margin-top: -7px;
+        border-radius: 50%;
+        background: #fff;
+        box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.35);
+        transform: rotate(var(--osc-angle, 180deg)) translateY(-54px);
+        transform-origin: center center;
+      }
+      .osc-angle-readout {
+        font-size: 0.95rem;
+        color: var(--drc-muted);
+      }
       .osc-grid {
         display: grid;
         grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1429,6 +1522,13 @@ class DysonRemoteCard extends HTMLElement {
       </div>
       <div class="osc-overlay" data-part="osc-overlay" hidden>
         <div class="osc-overlay__title">Oscillation</div>
+        <div class="osc-pointing">
+          <div class="osc-dial" data-part="osc-dial" aria-label="Pointing direction control">
+            <div class="osc-dial-arm" data-part="osc-dial-arm"></div>
+            <div class="osc-dial-knob" data-part="osc-dial-knob"></div>
+          </div>
+          <div class="osc-angle-readout" data-part="osc-angle-readout">180°</div>
+        </div>
         <div class="osc-grid" data-part="osc-options"></div>
         <div class="timer-actions">
           <button type="button" class="osc-chip overlay-close" data-action="osc_close">Close</button>
@@ -1461,6 +1561,18 @@ class DysonRemoteCard extends HTMLElement {
       const btn = ev.target.closest("button[data-action]");
       if (!btn) return;
       this._onAction(btn.getAttribute("data-action"));
+    });
+    inner.addEventListener("click", (ev) => {
+      const dial = ev.target.closest('[data-part="osc-dial"]');
+      if (!dial) return;
+      const rect = dial.getBoundingClientRect();
+      if (!(rect.width > 0 && rect.height > 0)) return;
+      const cx = rect.left + rect.width / 2;
+      const cy = rect.top + rect.height / 2;
+      const dx = ev.clientX - cx;
+      const dy = ev.clientY - cy;
+      const angle = clampDysonAngle((Math.atan2(dy, dx) * 180) / Math.PI + 90);
+      this._onAction(`osc_point_${angle}`);
     });
 
     const header = inner.querySelector(".header");
@@ -1608,6 +1720,14 @@ class DysonRemoteCard extends HTMLElement {
     if (nextPatch.auto_mode !== undefined && nextExpected.auto_mode !== undefined) {
       if (Boolean(realFan.auto_mode) === Boolean(nextExpected.auto_mode)) {
         del("auto_mode");
+      }
+    }
+
+    if (nextPatch.night_mode !== undefined && nextExpected.night_mode !== undefined) {
+      if (
+        normalizeNightModeValue(realFan.night_mode) === normalizeNightModeValue(nextExpected.night_mode)
+      ) {
+        del("night_mode");
       }
     }
 
@@ -1986,6 +2106,11 @@ class DysonRemoteCard extends HTMLElement {
     }
     const oscOverlay = this._rootEl.querySelector('[data-part="osc-overlay"]');
     if (oscOverlay) oscOverlay.hidden = !this._oscillationOverlayOpen;
+    const pointingAngle = inferPointingAngle(realFanAttrs);
+    const oscDial = this._rootEl.querySelector('[data-part="osc-dial"]');
+    if (oscDial) oscDial.style.setProperty("--osc-angle", `${pointingAngle}deg`);
+    const oscAngleReadout = this._rootEl.querySelector('[data-part="osc-angle-readout"]');
+    if (oscAngleReadout) oscAngleReadout.textContent = `${pointingAngle}°`;
     const oscOptionsEl = this._rootEl.querySelector('[data-part="osc-options"]');
     if (oscOptionsEl) {
       const overlayCurrentLabel =
@@ -2256,6 +2381,17 @@ class DysonRemoteCard extends HTMLElement {
           await this._applyOscillationPreset(hass, domain, entityId, Number(oscChoice.degrees || 0));
         }
         this._oscillationOverlayOpen = false;
+        this._updateDynamic();
+        return;
+      }
+      const oscPointMatch = /^osc_point_(\d+)$/.exec(action);
+      if (oscPointMatch) {
+        const angle = clampDysonAngle(Number(oscPointMatch[1]));
+        this._applyOptimisticPatch({ angle_low: angle, angle_high: angle });
+        const ok = await this._setPointingAngle(hass, entityId, angle);
+        if (!ok) {
+          console.warn("Dyson Remote: dyson.set_angle not available for", entityId);
+        }
         this._updateDynamic();
         return;
       }
@@ -2625,13 +2761,35 @@ class DysonRemoteCard extends HTMLElement {
           break;
         }
         case "night": {
-          const next = attrs.night_mode !== true;
-          const ok = await this._setNightMode(hass, domain, entityId, next);
+          const mergedForNight = { ...attrs, ...(this._optimisticAttrs || {}) };
+          const next = !isNightModeActive(mergedForNight);
+          this._applyOptimisticPatch({ night_mode: next });
+          const nightSwitchId = resolvedNightModeSwitchEntityId(
+            hass.states,
+            hass.entities,
+            timerDeviceId,
+            entityId,
+            climateEntityId,
+            this._config.night_mode_entity,
+          );
+          const ok = await this._setNightMode(
+            hass,
+            timerDeviceId,
+            domain,
+            entityId,
+            climateEntityId,
+            nightSwitchId,
+            next,
+          );
           if (!ok) {
+            if (this._optimisticAttrs) delete this._optimisticAttrs.night_mode;
+            if (this._optimisticExpected) delete this._optimisticExpected.night_mode;
+            this._maybeResyncOptimisticClearTimer();
+            this._updateDynamic();
             console.warn(
               "Dyson Remote: night mode service not available for",
               entityId,
-              "(tried dyson.set_night_mode and fan.turn_on night_mode field)",
+              "(expected switch.*_night_mode on the device, optional night_mode_entity, hass_dyson/dyson set_night_mode, or fan.turn_on night_mode field)",
             );
           }
           break;

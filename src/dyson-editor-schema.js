@@ -57,6 +57,14 @@ export function buildDysonRemoteCardEditorSchema(data) {
           },
         },
         {
+          name: "night_mode_entity",
+          selector: {
+            entity: {
+              domain: ["switch"],
+            },
+          },
+        },
+        {
           name: "humidifier_entity",
           selector: {
             entity: {

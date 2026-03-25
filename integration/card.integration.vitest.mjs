@@ -32,6 +32,10 @@ function createMockHass(overrides = {}) {
         temperature_unit: "°C",
       },
     },
+    "switch.dyson_device_night_mode": {
+      state: "off",
+      attributes: { friendly_name: "Night mode" },
+    },
     [climateId]: {
       state: "fan_only",
       attributes: {
@@ -52,6 +56,7 @@ function createMockHass(overrides = {}) {
     entities: {
       [entityId]: { device_id: deviceId },
       [climateId]: { device_id: deviceId },
+      "switch.dyson_device_night_mode": { device_id: deviceId },
     },
     services: {
       fan: { turn_on: {}, turn_off: {}, set_percentage: {}, set_temperature: {}, oscillate: {}, set_preset_mode: {}, set_direction: {} },
@@ -313,6 +318,32 @@ describe("dyson-remote-card integration harness", () => {
     const active = card.shadowRoot.querySelector('[data-part="osc-options"] .osc-chip.is-active');
     expect(active).toBeTruthy();
     expect(active.textContent.trim()).toBe("90°");
+  });
+
+  test("oscillation dial click calls dyson.set_angle with pointing angle", async () => {
+    const hass = createMockHass();
+    const card = createCard(hass);
+    card.shadowRoot.querySelector('[data-stepper="oscillation"]').click();
+    await nextTick();
+    const dial = card.shadowRoot.querySelector('[data-part="osc-dial"]');
+    dial.getBoundingClientRect = () => ({
+      left: 0,
+      top: 0,
+      width: 200,
+      height: 200,
+      right: 200,
+      bottom: 200,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    });
+    dial.dispatchEvent(new MouseEvent("click", { bubbles: true, clientX: 100, clientY: 0 }));
+    await nextTick();
+    const angleCall = hass.__calls.find((c) => c.domain === "dyson" && c.service === "set_angle");
+    expect(angleCall).toBeTruthy();
+    expect(angleCall.data.entity_id).toBe(FAN_ENTITY_ID);
+    expect(angleCall.data.angle_low).toBe(0);
+    expect(angleCall.data.angle_high).toBe(0);
   });
 
   test("oscillation select auto-discovery supports non-default select id suffixes", () => {
@@ -1116,17 +1147,60 @@ describe("dyson-remote-card integration harness", () => {
     expect(card.shadowRoot.querySelector('[data-part="thermal-target"]').textContent).toBe("AUTO");
   });
 
-  test("night action does not send night_mode via fan.turn_on", async () => {
+  test("night button shows engaged with optimistic state when fan reports night_mode OFF string", async () => {
+    const hass = createMockHass();
+    hass.states[FAN_ENTITY_ID].attributes.night_mode = "OFF";
+    const card = createCard(hass);
+    const nightBtn = card.shadowRoot.querySelector('button[data-action="night"]');
+    expect(nightBtn.classList.contains("is-engaged")).toBe(false);
+    nightBtn.click();
+    await nextTick();
+    expect(nightBtn.classList.contains("is-engaged")).toBe(true);
+  });
+
+  test("night action uses switch.turn_on on discovered night mode switch (hass-dyson style)", async () => {
     const hass = createMockHass();
     const card = createCard(hass);
-    const night = card.shadowRoot.querySelector('button[data-action="night"]');
-    night.click();
+    card.shadowRoot.querySelector('button[data-action="night"]').click();
     await nextTick();
+
+    const swCall = hass.__calls.find((c) => c.domain === "switch" && c.service === "turn_on");
+    expect(swCall).toBeTruthy();
+    expect(swCall.data.entity_id).toBe("switch.dyson_device_night_mode");
 
     const invalidNightPayload = hass.__calls.some(
       (c) => c.domain === "fan" && c.service === "turn_on" && Object.hasOwn(c.data || {}, "night_mode"),
     );
     expect(invalidNightPayload).toBe(false);
+  });
+
+  test("night action uses hass_dyson.set_night_mode when no night switch and service is registered", async () => {
+    const hass = createMockHass();
+    delete hass.states["switch.dyson_device_night_mode"];
+    delete hass.entities["switch.dyson_device_night_mode"];
+    hass.services.hass_dyson = { ...hass.services.hass_dyson, set_night_mode: {} };
+    const card = createCard(hass);
+    card.shadowRoot.querySelector('button[data-action="night"]').click();
+    await nextTick();
+
+    const nightCall = hass.__calls.find((c) => c.domain === "hass_dyson" && c.service === "set_night_mode");
+    expect(nightCall).toBeTruthy();
+    expect(nightCall.data.device_id).toBe("device-dyson-1");
+    expect(nightCall.data.night_mode).toBe(true);
+  });
+
+  test("night action falls back to dyson.set_night_mode when night switch absent", async () => {
+    const hass = createMockHass();
+    delete hass.states["switch.dyson_device_night_mode"];
+    delete hass.entities["switch.dyson_device_night_mode"];
+    const card = createCard(hass);
+    card.shadowRoot.querySelector('button[data-action="night"]').click();
+    await nextTick();
+
+    const dysonCall = hass.__calls.find((c) => c.domain === "dyson" && c.service === "set_night_mode");
+    expect(dysonCall).toBeTruthy();
+    expect(dysonCall.data.entity_id).toBe(FAN_ENTITY_ID);
+    expect(dysonCall.data.night_mode).toBe(true);
   });
 
   test("oscillation action does not send oscillating via fan.turn_on", async () => {

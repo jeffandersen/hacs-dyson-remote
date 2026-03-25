@@ -303,6 +303,51 @@ export function pickSelectOptionHumidityAuto(options, wantAutoOn) {
  * @param {Record<string, unknown>|null|undefined} states - `hass.states`
  * @param {string|null|undefined} humidityAutoEntityTrimmed - optional configured entity id
  */
+/**
+ * hass-dyson (cmgrayb) exposes night mode as `switch.*_night_mode` on the device; `fan.turn_on` does not apply it.
+ * Optional `night_mode_entity` in card config overrides discovery.
+ *
+ * @param {Record<string, unknown>|null|undefined} states - `hass.states`
+ * @param {Record<string, { device_id?: string }>|null|undefined} entities - `hass.entities` (registry)
+ * @param {string} deviceId - device registry id from `hass.entities[fan].device_id`
+ */
+export function resolvedNightModeSwitchEntityId(
+  states,
+  entities,
+  deviceId,
+  fanEntityId,
+  climateEntityId,
+  overrideTrimmed,
+) {
+  const manual = typeof overrideTrimmed === "string" ? overrideTrimmed.trim() : "";
+  if (manual && manual.startsWith("switch.") && states?.[manual]) return manual;
+
+  for (const base of [fanEntityId, climateEntityId]) {
+    const oid = objectIdFromEntityId(base);
+    if (!oid) continue;
+    const id = `switch.${oid}_night_mode`;
+    if (states?.[id]) return id;
+  }
+
+  if (entities && typeof entities === "object" && deviceId) {
+    for (const entityId of Object.keys(entities)) {
+      if (!entityId.startsWith("switch.") || !states?.[entityId]) continue;
+      const entry = entities[entityId];
+      if (!entry || entry.device_id !== deviceId) continue;
+      if (entityId.toLowerCase().includes("night_mode")) return entityId;
+    }
+    for (const entityId of Object.keys(entities)) {
+      if (!entityId.startsWith("switch.") || !states?.[entityId]) continue;
+      const entry = entities[entityId];
+      if (!entry || entry.device_id !== deviceId) continue;
+      const fn = states[entityId]?.attributes?.friendly_name;
+      if (typeof fn === "string" && /\bnight\b/i.test(fn) && /\bmode\b/i.test(fn)) return entityId;
+    }
+  }
+
+  return null;
+}
+
 export function resolvedHumidityAutoToggleEntityId(states, climateEntityId, humidityAutoEntityTrimmed) {
   const manual = typeof humidityAutoEntityTrimmed === "string" ? humidityAutoEntityTrimmed.trim() : "";
   if (manual && states?.[manual]) {
@@ -808,8 +853,24 @@ export function entityIsPowered(st, attrs) {
   return s !== "off" && s !== "unavailable";
 }
 
+/**
+ * Some integrations expose `night_mode` as booleans; others use strings (e.g. ON/OFF).
+ * Never use `Boolean(string)` for reconciliation — `Boolean("OFF")` is true in JavaScript.
+ */
+export function normalizeNightModeValue(v) {
+  if (v === true || v === 1) return true;
+  if (v === false || v == null || v === 0 || v === "") return false;
+  if (typeof v === "string") {
+    const s = v.trim().toUpperCase();
+    if (s === "OFF" || s === "FALSE" || s === "0" || s === "NO") return false;
+    if (s === "ON" || s === "TRUE" || s === "1" || s === "YES") return true;
+    return false;
+  }
+  return false;
+}
+
 export function isNightModeActive(attrs) {
-  return attrs?.night_mode === true;
+  return normalizeNightModeValue(attrs?.night_mode);
 }
 
 export function isAirflowControlEngaged(st, attrs) {
