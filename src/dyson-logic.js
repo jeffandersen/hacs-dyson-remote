@@ -565,6 +565,15 @@ export function oscillationPresetLabel(degrees) {
  */
 export function oscillationIsEnabled(attrs) {
   if (!attrs || typeof attrs !== "object") return false;
+
+  // oscillation_span: 0 is ground-truth that sweep is disabled, regardless of what
+  // oscillation_enabled / oscillating report. The device remembers the last angle
+  // (mode attr may still show it) but physically the sweep is off.
+  // See CLAUDE.md: "Returns false when oscillation_span is explicitly 0 — even if
+  // oscillation_mode / select state still shows a remembered angle."
+  const span = Number(attrs.oscillation_span);
+  if (Number.isFinite(span) && span === 0) return false;
+
   if (attrs.oscillating === false) return false;
   if (attrs.oscillating === true) return true;
 
@@ -577,9 +586,7 @@ export function oscillationIsEnabled(attrs) {
     if (s === "true" || s === "on" || s === "1") return true;
   }
 
-  const span = Number(attrs.oscillation_span);
   if (Number.isFinite(span) && span > 0) return true;
-  if (Number.isFinite(span) && span <= 0) return false;
 
   const al = typeof attrs.angle_low === "number" ? attrs.angle_low : attrs.oscillation_angle_low;
   const ah = typeof attrs.angle_high === "number" ? attrs.angle_high : attrs.oscillation_angle_high;
@@ -647,8 +654,14 @@ export function oscillationMergeForEnabled(selectAttrs, fanAttrs) {
   if (Object.hasOwn(s, "oscillation_enabled")) out.oscillation_enabled = s.oscillation_enabled;
   else if (Object.hasOwn(f, "oscillation_enabled")) out.oscillation_enabled = f.oscillation_enabled;
 
-  if (Object.hasOwn(s, "oscillation_span")) out.oscillation_span = s.oscillation_span;
-  else if (Object.hasOwn(f, "oscillation_span")) out.oscillation_span = f.oscillation_span;
+  // When the select entity has an explicit oscillation_enabled attribute it is the
+  // authoritative enabled signal (e.g. hass-dyson humidifiers). In that case skip
+  // oscillation_span entirely — humidifiers always report span=0 even while sweeping,
+  // so including it would cause oscillationIsEnabled to incorrectly return false.
+  if (!Object.hasOwn(s, "oscillation_enabled")) {
+    if (Object.hasOwn(s, "oscillation_span")) out.oscillation_span = s.oscillation_span;
+    else if (Object.hasOwn(f, "oscillation_span")) out.oscillation_span = f.oscillation_span;
+  }
 
   const alS = s.oscillation_angle_low;
   const ahS = s.oscillation_angle_high;

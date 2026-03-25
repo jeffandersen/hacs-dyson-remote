@@ -2,6 +2,43 @@
 
 > **Keep this file updated.** When you change integration logic, entity resolution, service-call paths, or project structure in `src/`, update the relevant section here before closing the PR.
 
+---
+
+## Agent instructions — Tests are specifications
+
+**Tests encode correct behavior. They are not obstacles to work around.**
+
+When a test fails after a code change:
+- **Fix the implementation** so it satisfies the test. Do not change the test's expected value to match the new (broken) behavior.
+- If you genuinely believe the test expectation is wrong — i.e., it contradicts the spec in this file — **stop and ask the user** before changing anything. Cite the specific CLAUDE.md section and explain the conflict.
+- If you cannot make the implementation satisfy the test without understanding why the test expects that specific value, **ask the user** rather than guessing.
+
+When tests pass but you changed their assertions to make them pass:
+- That is a regression, not a fix. The test now documents what the code does, not what it should do.
+- Any change to an `.equal()`, `.deepEqual()`, `.toBe()`, `.toEqual()`, or similar assertion argument **requires a comment** explaining which CLAUDE.md section or explicit user instruction justifies the new expected value.
+
+**`test/regression.test.mjs` is append-only.** Tests in that file were written to catch specific bugs that were previously shipped. Never delete or weaken an assertion in that file. If one fails, the implementation regressed — fix it.
+
+---
+
+## Agent instructions — Home Assistant context gathering
+
+**Before making any decisions about entity state handling, service calls, attribute names, or action parameters, agents MUST ask the user for relevant information from the Home Assistant developer tools.**
+
+The developer tools provide ground truth about what HA actually exposes at runtime. Do not assume attribute names, service parameters, or state values match what's documented here — Dyson integration versions vary and entity shapes differ across installs.
+
+Ask the user to provide any of the following that are relevant to the task at hand:
+
+- **Entity state + attributes** — from *Developer Tools → States*, filter by the entity id (e.g. `fan.dyson_xxx`). Paste the full state object including all attributes.
+- **Available services / actions** — from *Developer Tools → Services* (or *Actions* in newer HA), look up services like `fan.turn_on`, `fan.set_preset_mode`, `climate.set_humidity`, `humidifier.set_humidity`, `humidifier.set_mode`, `select.select_option`, `switch.turn_on`, etc. Include the service schema / fields shown in the UI.
+- **Device info** — the `device_id` of the Dyson device (visible in Settings → Devices, or from the entity's device page). Required for `hass_dyson.set_night_mode`, `hass_dyson.set_sleep_timer`, etc.
+- **All related entities** — from the device page, the full list of entities belonging to the Dyson device (fan, climate, humidifier, select, number, switch, sensor entities). This is critical for entity resolution logic.
+- **Template output** — if there's ambiguity about a computed value, ask the user to run a template in *Developer Tools → Template* and share the result.
+
+**When to ask:** Any time a task involves writing or changing logic that reads entity state, calls a service, resolves a paired entity, or handles a specific attribute value. If the task is purely cosmetic (CSS, layout, labels) and doesn't touch HA data, this step can be skipped.
+
+Phrase the request concretely — tell the user exactly which entity ids to look up and which fields are needed, rather than asking generically.
+
 ## What this project is
 
 A single-file **Lovelace custom card** (`custom:dyson-remote-card`) for Home Assistant that replicates the iOS Dyson app control strip. It targets `fan.*` entities (and optionally `climate.*` / `humidifier.*`) created by a Dyson integration — primarily **hass-dyson** (cmgrayb/hass-dyson, installed via HACS). The card is UI-only; it does not talk to Dyson devices directly.
@@ -122,6 +159,19 @@ The card is configured with a single `entity` (usually `fan.*`, occasionally `cl
 | `min_humidity` / `max_humidity` | Stepper range (30–70 on Dyson) |
 | `target_humidity_step` | Step; may be absent — card infers 10 from range |
 
+### `select.*_oscillation` attributes
+
+| Attribute | Meaning |
+|---|---|
+| `options` | Available span presets, e.g. `["45°", "90°", "180°", "350°", "Breeze", "Custom"]` — fan omits Breeze |
+| `oscillation_mode` | Currently active option string (mirrors `state`) |
+| `oscillation_enabled` | Whether oscillation is active |
+| `oscillation_angle_low` / `oscillation_angle_high` | Absolute angle bounds for the current sweep |
+| `oscillation_center` | Center angle of the current sweep |
+| `oscillation_span` | Span in degrees (may be 0 even when oscillating on humidifiers) |
+
+**Fan vs humidifier options:** Humidifier select includes `Breeze` (random sweep); fan select does not. Both include `Custom` (set via `hass_dyson.set_oscillation_angles`). `Custom` is filtered out of chip chips — it is set implicitly by the pointing-angle drag, not user-selectable as a named preset.
+
 ---
 
 ## Combo humidifier mode
@@ -166,9 +216,20 @@ Only one path fires per press to avoid race conditions. `humidity_write: "humidi
 
 The card prefers `select.*_oscillation` over `fan.oscillate` / `dyson.set_angle`.
 
-**Enabled check** (`oscillationIsEnabled()`): checks `oscillating`, then `oscillation_enabled` (bool, number, or string), then `oscillation_span > 0`, then `|angle_high - angle_low| > 1`. Returns **false** when `oscillation_span` is explicitly 0 — even if `oscillation_mode` / select state still shows a remembered angle. This matches libdyson: the angle can be remembered while sweep is off.
+**Enabled check** (`oscillationIsEnabled()`): checks `oscillation_span` first — returns **false** when `oscillation_span` is explicitly 0 (ground truth that sweep is off, wins over all other attrs), returns `true` when `oscillation_span > 0`. Falls back to `oscillating`, then `oscillation_enabled` (bool/number/string), then `|angle_high - angle_low| > 1`.
+
+**Humidifier caveat** (`oscillationMergeForEnabled()`): hass-dyson humidifiers always report `oscillation_span: 0` on both the fan and select entities, even when actively sweeping. When the select entity has an explicit `oscillation_enabled` attribute, `oscillationMergeForEnabled` omits `oscillation_span` from the merged result entirely so that `oscillationIsEnabled` uses `oscillation_enabled` (the authoritative signal) instead of the always-zero span.
 
 **Presets:** Default `[0, 45, 90, 180, 350]`. Configurable via `oscillation_presets`. `0` always means Off.
+
+**Pointing-angle drag** — `_setPointingAngle(hass, entityId, angle, deviceId, spanDeg)` tries in order:
+1. `hass_dyson.set_oscillation_angles` (`device_id`, `lower_angle`, `upper_angle`) — current hass-dyson (cmgrayb)
+2. `dyson.set_angle` (`entity_id`, `angle_low`, `angle_high`) — legacy dyson integration
+3. `hass_dyson.set_angle` (`device_id`, `angle_low`, `angle_high`) — older hass_dyson builds
+
+`spanDeg` preserves the current sweep width when repointing: the caller determines the active span from the select entity's current option label (e.g. `"45°"` → 45) or falls back to `|angle_high − angle_low|`. The function computes `lower = center − span/2`, `upper = center + span/2` (clamped to 5–355). When `spanDeg === 0` (no active sweep), `lower = upper = pointing angle`, entering `Custom` single-point mode.
+
+**Oscillation preset chip handler** — when a `select.*_oscillation` entity is available and the chip has a direct option value, the handler calls `fan.turn_on` then `select.select_option`. `fan.turn_on` is **skipped only in humidifier combo mode** because calling it before `select.select_option` on hass-dyson humidifiers races and reverts the oscillation mode. For plain fans, `fan.turn_on` is always called (with or without a select entity) to activate oscillation. When there is no select entity path the fallback goes through `_applyOscillationPreset` (uses `fan.oscillate`).
 
 ---
 

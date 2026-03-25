@@ -1149,6 +1149,15 @@ function oscillationPresetLabel(degrees) {
  */
 function oscillationIsEnabled(attrs) {
   if (!attrs || typeof attrs !== "object") return false;
+
+  // oscillation_span: 0 is ground-truth that sweep is disabled, regardless of what
+  // oscillation_enabled / oscillating report. The device remembers the last angle
+  // (mode attr may still show it) but physically the sweep is off.
+  // See CLAUDE.md: "Returns false when oscillation_span is explicitly 0 — even if
+  // oscillation_mode / select state still shows a remembered angle."
+  const span = Number(attrs.oscillation_span);
+  if (Number.isFinite(span) && span === 0) return false;
+
   if (attrs.oscillating === false) return false;
   if (attrs.oscillating === true) return true;
 
@@ -1161,9 +1170,7 @@ function oscillationIsEnabled(attrs) {
     if (s === "true" || s === "on" || s === "1") return true;
   }
 
-  const span = Number(attrs.oscillation_span);
   if (Number.isFinite(span) && span > 0) return true;
-  if (Number.isFinite(span) && span <= 0) return false;
 
   const al = typeof attrs.angle_low === "number" ? attrs.angle_low : attrs.oscillation_angle_low;
   const ah = typeof attrs.angle_high === "number" ? attrs.angle_high : attrs.oscillation_angle_high;
@@ -1231,8 +1238,14 @@ function oscillationMergeForEnabled(selectAttrs, fanAttrs) {
   if (Object.hasOwn(s, "oscillation_enabled")) out.oscillation_enabled = s.oscillation_enabled;
   else if (Object.hasOwn(f, "oscillation_enabled")) out.oscillation_enabled = f.oscillation_enabled;
 
-  if (Object.hasOwn(s, "oscillation_span")) out.oscillation_span = s.oscillation_span;
-  else if (Object.hasOwn(f, "oscillation_span")) out.oscillation_span = f.oscillation_span;
+  // When the select entity has an explicit oscillation_enabled attribute it is the
+  // authoritative enabled signal (e.g. hass-dyson humidifiers). In that case skip
+  // oscillation_span entirely — humidifiers always report span=0 even while sweeping,
+  // so including it would cause oscillationIsEnabled to incorrectly return false.
+  if (!Object.hasOwn(s, "oscillation_enabled")) {
+    if (Object.hasOwn(s, "oscillation_span")) out.oscillation_span = s.oscillation_span;
+    else if (Object.hasOwn(f, "oscillation_span")) out.oscillation_span = f.oscillation_span;
+  }
 
   const alS = s.oscillation_angle_low;
   const ahS = s.oscillation_angle_high;
@@ -1451,7 +1464,7 @@ function isAirflowControlEngaged(st, attrs) {
   return false;
 }
 
-const _dysonRemoteBuildToken = "1.0.0+2026-03-25";
+const _dysonRemoteBuildToken = "1.0.0+2026-03-26";
 const DYSON_REMOTE_BUILD = _dysonRemoteBuildToken.startsWith("__DYSON_")
   ? "dev"
   : _dysonRemoteBuildToken;
@@ -1677,6 +1690,25 @@ function inferPointingAngle(attrs) {
   return 180;
 }
 
+/**
+ * SVG sector path for the oscillation spread visualisation inside the 140×140 dial.
+ * pointingDeg: Dyson angle (0 = 12 o'clock, clockwise). spanDeg: total sweep width.
+ */
+function buildOscSpreadPath(pointingDeg, spanDeg) {
+  if (!spanDeg || spanDeg <= 0) return "";
+  const cx = 70, cy = 70, r = 64;
+  const half = spanDeg / 2;
+  const toRad = (deg) => (deg - 90) * Math.PI / 180;
+  const a1 = toRad(pointingDeg - half);
+  const a2 = toRad(pointingDeg + half);
+  const x1 = (cx + r * Math.cos(a1)).toFixed(2);
+  const y1 = (cy + r * Math.sin(a1)).toFixed(2);
+  const x2 = (cx + r * Math.cos(a2)).toFixed(2);
+  const y2 = (cy + r * Math.sin(a2)).toFixed(2);
+  const large = spanDeg > 180 ? 1 : 0;
+  return `M${cx},${cy} L${x1},${y1} A${r},${r} 0 ${large},1 ${x2},${y2} Z`;
+}
+
 function relatedClimateEntityId(hass, fanEntityId) {
   if (!fanEntityId || typeof fanEntityId !== "string") return null;
   const idx = fanEntityId.indexOf(".");
@@ -1884,6 +1916,8 @@ class DysonRemoteCard extends HTMLElement {
     this._timerOverlayOpen = false;
     this._oscillationOverlayOpen = false;
     this._oscillationChoices = [];
+    this._oscDragActive = false;
+    this._humidifierMode = false;
   }
 
   set hass(hass) {
@@ -2079,14 +2113,39 @@ class DysonRemoteCard extends HTMLElement {
     return false;
   }
 
-  async _setPointingAngle(hass, entityId, angle) {
+  async _setPointingAngle(hass, entityId, angle, deviceId, spanDeg = 0) {
     if (!entityId) return false;
     const a = clampDysonAngle(angle);
+    // Compute bounds: when spanDeg > 0 preserve the current sweep width centered
+    // on the new pointing angle. When spanDeg === 0 (no active sweep) both bounds
+    // equal the target angle, entering "Custom" single-point mode.
+    const halfSpan = Math.round((spanDeg || 0) / 2);
+    const lower = halfSpan > 0 ? Math.max(5, a - halfSpan) : a;
+    const upper = halfSpan > 0 ? Math.min(355, a + halfSpan) : a;
+    // hass-dyson (cmgrayb) exposes set_oscillation_angles with lower_angle/upper_angle + device_id
+    if (deviceId && hass?.services?.hass_dyson?.set_oscillation_angles) {
+      await hass.callService("hass_dyson", "set_oscillation_angles", {
+        device_id: deviceId,
+        lower_angle: lower,
+        upper_angle: upper,
+      });
+      return true;
+    }
+    // legacy dyson integration uses set_angle with entity_id + angle_low/angle_high
     if (hass?.services?.dyson?.set_angle) {
       await hass.callService("dyson", "set_angle", {
         entity_id: entityId,
-        angle_low: a,
-        angle_high: a,
+        angle_low: lower,
+        angle_high: upper,
+      });
+      return true;
+    }
+    // older hass_dyson versions may have used set_angle
+    if (deviceId && hass?.services?.hass_dyson?.set_angle) {
+      await hass.callService("hass_dyson", "set_angle", {
+        device_id: deviceId,
+        angle_low: lower,
+        angle_high: upper,
       });
       return true;
     }
@@ -2528,15 +2587,35 @@ class DysonRemoteCard extends HTMLElement {
         position: absolute;
         left: 50%;
         top: 50%;
-        width: 14px;
+        width: 12px;
         height: 14px;
-        margin-left: -7px;
+        margin-left: -6px;
         margin-top: -7px;
-        border-radius: 50%;
         background: #fff;
-        box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.35);
-        transform: rotate(var(--osc-angle, 180deg)) translateY(-54px);
+        clip-path: polygon(50% 0%, 0% 100%, 100% 100%);
+        transform: rotate(var(--osc-angle, 180deg)) translateY(-56px);
         transform-origin: center center;
+      }
+      .osc-dial-cord {
+        position: absolute;
+        left: calc(50% - 0.75px);
+        top: 0;
+        width: 1.5px;
+        height: 50%;
+        background: rgba(255, 255, 255, 0.45);
+        pointer-events: none;
+      }
+      .osc-spread-svg {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        border-radius: 50%;
+        overflow: hidden;
+        pointer-events: none;
+      }
+      .osc-spread-svg path {
+        fill: rgba(255, 255, 255, 0.1);
       }
       .osc-angle-readout {
         font-size: 0.95rem;
@@ -2926,6 +3005,8 @@ class DysonRemoteCard extends HTMLElement {
         <div class="osc-overlay__title">Oscillation</div>
         <div class="osc-pointing">
           <div class="osc-dial" data-part="osc-dial" aria-label="Pointing direction control">
+            <svg class="osc-spread-svg" viewBox="0 0 140 140" xmlns="http://www.w3.org/2000/svg"><path data-part="osc-spread-path" d=""/></svg>
+            <div class="osc-dial-cord"></div>
             <div class="osc-dial-arm" data-part="osc-dial-arm"></div>
             <div class="osc-dial-knob" data-part="osc-dial-knob"></div>
           </div>
@@ -2964,17 +3045,51 @@ class DysonRemoteCard extends HTMLElement {
       if (!btn) return;
       this._onAction(btn.getAttribute("data-action"));
     });
-    inner.addEventListener("click", (ev) => {
+    let _oscDragAngle = null;
+    inner.addEventListener("pointerdown", (ev) => {
+      if (this._humidifierMode) return;
       const dial = ev.target.closest('[data-part="osc-dial"]');
+      if (!dial) return;
+      ev.preventDefault();
+      this._oscDragActive = true;
+      _oscDragAngle = null;
+      dial.setPointerCapture(ev.pointerId);
+    });
+    inner.addEventListener("pointermove", (ev) => {
+      if (!this._oscDragActive) return;
+      const dial = inner.querySelector('[data-part="osc-dial"]');
       if (!dial) return;
       const rect = dial.getBoundingClientRect();
       if (!(rect.width > 0 && rect.height > 0)) return;
       const cx = rect.left + rect.width / 2;
       const cy = rect.top + rect.height / 2;
-      const dx = ev.clientX - cx;
-      const dy = ev.clientY - cy;
-      const angle = clampDysonAngle((Math.atan2(dy, dx) * 180) / Math.PI + 90);
+      const angle = clampDysonAngle((Math.atan2(ev.clientY - cy, ev.clientX - cx) * 180) / Math.PI + 90);
+      _oscDragAngle = angle;
+      dial.style.setProperty("--osc-angle", `${angle}deg`);
+      const readout = inner.querySelector('[data-part="osc-angle-readout"]');
+      if (readout) readout.textContent = `${angle}°`;
+      const spreadPath = inner.querySelector('[data-part="osc-spread-path"]');
+      if (spreadPath) {
+        const spanDeg = oscillationChoiceDegrees(inner.querySelector('[data-part="osc-mid"]')?.textContent || "") ?? 0;
+        spreadPath.setAttribute("d", buildOscSpreadPath(angle, spanDeg));
+      }
+    });
+    inner.addEventListener("pointerup", (ev) => {
+      if (!this._oscDragActive) return;
+      this._oscDragActive = false;
+      const dial = inner.querySelector('[data-part="osc-dial"]');
+      if (!dial) return;
+      const rect = dial.getBoundingClientRect();
+      if (!(rect.width > 0 && rect.height > 0)) return;
+      const cx = rect.left + rect.width / 2;
+      const cy = rect.top + rect.height / 2;
+      const angle = _oscDragAngle ?? clampDysonAngle((Math.atan2(ev.clientY - cy, ev.clientX - cx) * 180) / Math.PI + 90);
+      _oscDragAngle = null;
       this._onAction(`osc_point_${angle}`);
+    });
+    inner.addEventListener("pointercancel", () => {
+      this._oscDragActive = false;
+      _oscDragAngle = null;
     });
 
     const header = inner.querySelector(".header");
@@ -3508,15 +3623,29 @@ class DysonRemoteCard extends HTMLElement {
     }
     const oscOverlay = this._rootEl.querySelector('[data-part="osc-overlay"]');
     if (oscOverlay) oscOverlay.hidden = !this._oscillationOverlayOpen;
-    const pointingAngle = inferPointingAngle(realFanAttrs);
-    const oscDial = this._rootEl.querySelector('[data-part="osc-dial"]');
-    if (oscDial) oscDial.style.setProperty("--osc-angle", `${pointingAngle}deg`);
-    const oscAngleReadout = this._rootEl.querySelector('[data-part="osc-angle-readout"]');
-    if (oscAngleReadout) oscAngleReadout.textContent = `${pointingAngle}°`;
+    this._humidifierMode = humidifierMode;
+    // Humidifier combo devices don't physically rotate — lock dial to 180° (front-facing).
+    // Their angle_low/angle_high attributes are not meaningful pointing data.
+    const pointingAngle = humidifierMode ? 180 : inferPointingAngle(realFanAttrs);
+    const spreadDeg = oscillationChoiceDegrees(currentOscLabel) ?? 0;
+    if (!this._oscDragActive) {
+      const oscDial = this._rootEl.querySelector('[data-part="osc-dial"]');
+      if (oscDial) oscDial.style.setProperty("--osc-angle", `${pointingAngle}deg`);
+      const oscAngleReadout = this._rootEl.querySelector('[data-part="osc-angle-readout"]');
+      if (oscAngleReadout) {
+        oscAngleReadout.hidden = humidifierMode;
+        if (!humidifierMode) oscAngleReadout.textContent = `${pointingAngle}°`;
+      }
+      const oscSpreadPath = this._rootEl.querySelector('[data-part="osc-spread-path"]');
+      if (oscSpreadPath) oscSpreadPath.setAttribute("d", buildOscSpreadPath(pointingAngle, spreadDeg));
+    }
     const oscOptionsEl = this._rootEl.querySelector('[data-part="osc-options"]');
     if (oscOptionsEl) {
+      // When oscillation is off, oscFromSelect.label is "OFF" but oscSelectSt.state
+      // still holds the last active preset (e.g. "45°"). Using the raw select state
+      // would incorrectly highlight that preset chip; gate on engaged being true.
       const overlayCurrentLabel =
-        oscOptions.length > 0 && typeof oscSelectSt?.state === "string" && oscSelectSt.state.trim()
+        oscOptions.length > 0 && oscFromSelect?.engaged !== false && typeof oscSelectSt?.state === "string" && oscSelectSt.state.trim()
           ? normalizeOscillationChoiceLabel(oscSelectSt.state)
           : currentOscLabel;
       const normalizedCurrent = normalizeOscillationChoiceLabel(overlayCurrentLabel).toLowerCase();
@@ -3776,7 +3905,13 @@ class DysonRemoteCard extends HTMLElement {
             oscillation_span: oscChoice.degrees,
           });
         }
-        await hass.callService(domain, "turn_on", { entity_id: entityId });
+        // Skip fan.turn_on only for humidifier combo mode: calling it before
+        // select.select_option on hass-dyson humidifiers races and reverts the
+        // oscillation mode. For plain fans (with or without a select entity),
+        // fan.turn_on is still needed to activate oscillation.
+        if (!humidifierMode) {
+          await hass.callService(domain, "turn_on", { entity_id: entityId });
+        }
         if (oscChoice.option && oscSelectId && hass?.services?.select?.select_option) {
           await hass.callService("select", "select_option", { entity_id: oscSelectId, option: oscChoice.option });
         } else {
@@ -3788,11 +3923,29 @@ class DysonRemoteCard extends HTMLElement {
       }
       const oscPointMatch = /^osc_point_(\d+)$/.exec(action);
       if (oscPointMatch) {
+        if (this._humidifierMode) return;
         const angle = clampDysonAngle(Number(oscPointMatch[1]));
-        this._applyOptimisticPatch({ angle_low: angle, angle_high: angle });
-        const ok = await this._setPointingAngle(hass, entityId, angle);
+        // Determine current oscillation span so dragging repoints without collapsing
+        // the sweep. Prefer select entity's current option label (e.g. "45°" → 45),
+        // fall back to the absolute angle spread from angle attrs.
+        const oscSelectSt = oscSelectId ? hass?.states?.[oscSelectId] : null;
+        const oscSelectAttrs = oscSelectSt?.attributes || {};
+        const selectStateDeg = oscillationChoiceDegrees(oscSelectSt?.state);
+        let spanDeg = 0;
+        if (selectStateDeg != null && selectStateDeg > 0) {
+          spanDeg = selectStateDeg;
+        } else {
+          const alo = Number(oscSelectAttrs.oscillation_angle_low ?? attrs.angle_low ?? 0);
+          const ahi = Number(oscSelectAttrs.oscillation_angle_high ?? attrs.angle_high ?? 0);
+          spanDeg = Math.abs(ahi - alo);
+        }
+        const halfSpan = Math.round(spanDeg / 2);
+        const lower = halfSpan > 0 ? Math.max(5, angle - halfSpan) : angle;
+        const upper = halfSpan > 0 ? Math.min(355, angle + halfSpan) : angle;
+        this._applyOptimisticPatch({ angle_low: lower, angle_high: upper });
+        const ok = await this._setPointingAngle(hass, entityId, angle, timerDeviceId, spanDeg);
         if (!ok) {
-          console.warn("Dyson Remote: dyson.set_angle not available for", entityId);
+          console.warn("Dyson Remote: pointing-angle service not available for", entityId);
         }
         this._updateDynamic();
         return;

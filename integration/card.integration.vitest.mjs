@@ -187,6 +187,8 @@ describe("dyson-remote-card integration harness", () => {
   });
 
   test("oscillation overlay selection calls services for preset angle", async () => {
+    // When no select.* oscillation entity exists, the card falls back to
+    // dyson.set_angle + fan.oscillate. Both calls must happen with the correct data.
     const hass = createMockHass();
     const card = createCard(hass);
     card.shadowRoot.querySelector('[data-stepper="oscillation"]').click();
@@ -195,16 +197,31 @@ describe("dyson-remote-card integration harness", () => {
     option.click();
     await nextTick();
 
-    const hasSetAngle = hass.__calls.some((c) => c.domain === "dyson" && c.service === "set_angle");
-    const hasOscillateOn = hass.__calls.some(
+    const angleCall = hass.__calls.find((c) => c.domain === "dyson" && c.service === "set_angle");
+    expect(angleCall).toBeTruthy();
+    // Pointing angle 90° → lower and upper both 90 (symmetric point, no spread)
+    expect(angleCall.data.entity_id).toBe(FAN_ENTITY_ID);
+    expect(angleCall.data.angle_low).toBe(90);
+    expect(angleCall.data.angle_high).toBe(90);
+
+    const oscillateCall = hass.__calls.find(
       (c) => c.domain === "fan" && c.service === "oscillate" && c.data.oscillating === true,
     );
-    expect(hasSetAngle).toBe(true);
-    expect(hasOscillateOn).toBe(true);
+    expect(oscillateCall).toBeTruthy();
+    expect(oscillateCall.data.entity_id).toBe(FAN_ENTITY_ID);
+
+    // Overlay must close after selection
     expect(card.shadowRoot.querySelector('[data-part="osc-overlay"]').hidden).toBe(true);
+
+    // Must NOT have used select.select_option (no select entity present)
+    const selectCall = hass.__calls.find((c) => c.domain === "select" && c.service === "select_option");
+    expect(selectCall).toBeUndefined();
   });
 
   test("oscillation uses select.select_option when select.<fan>_oscillation exists", async () => {
+    // When a select.*_oscillation entity exists, the card must use select.select_option ONLY.
+    // Calling fan.turn_on before select.select_option on hass-dyson humidifiers can race and
+    // revert the oscillation mode. See CLAUDE.md: "Oscillation preset chip handler" section.
     const selectId = "select.dyson_device_oscillation";
     const hass = createMockHass();
     hass.states[selectId] = {
@@ -220,13 +237,20 @@ describe("dyson-remote-card integration harness", () => {
     option.click();
     await nextTick();
 
+    // Must call select.select_option with the correct entity and option value
     const selectCall = hass.__calls.find((c) => c.domain === "select" && c.service === "select_option");
     expect(selectCall).toBeTruthy();
     expect(selectCall.data.entity_id).toBe(selectId);
     expect(selectCall.data.option).toBe("90°");
 
-    const hasSetAngle = hass.__calls.some((c) => c.domain === "dyson" && c.service === "set_angle");
-    expect(hasSetAngle).toBe(false);
+    // Must NOT call dyson.set_angle (select path replaces the fallback path entirely)
+    const angleCall = hass.__calls.find((c) => c.domain === "dyson" && c.service === "set_angle");
+    expect(angleCall).toBeUndefined();
+
+    // Must NOT call fan.turn_on before select — that races and reverts oscillation on humidifier models
+    const fanTurnOn = hass.__calls.find((c) => c.domain === "fan" && c.service === "turn_on");
+    expect(fanTurnOn).toBeUndefined();
+
     expect(card.shadowRoot.querySelector('[data-part="osc-overlay"]').hidden).toBe(true);
   });
 
@@ -365,21 +389,30 @@ describe("dyson-remote-card integration harness", () => {
   });
 
   test("heating +/- does not send temperature to fan.turn_on", async () => {
+    // HA's fan.turn_on service has no `temperature` field — sending it is silently ignored
+    // or causes an HA error depending on version. Temperature must always go via climate.set_temperature.
     const hass = createMockHass();
     const card = createCard(hass);
     const plus = card.shadowRoot.querySelector('button[data-action="heat_plus"]');
     plus.click();
     await nextTick();
 
-    const invalidFanTurnOn = hass.__calls.some(
+    // Negative check: no fan.turn_on with a temperature key
+    const invalidFanTurnOn = hass.__calls.find(
       (c) => c.domain === "fan" && c.service === "turn_on" && Object.hasOwn(c.data || {}, "temperature"),
     );
-    expect(invalidFanTurnOn).toBe(false);
-    const usedClimateTemp = hass.__calls.some((c) => c.domain === "climate" && c.service === "set_temperature");
-    expect(usedClimateTemp).toBe(true);
+    expect(invalidFanTurnOn).toBeUndefined();
+
+    // Positive check: climate.set_temperature was called with the correct entity and a numeric value
+    const climateTempCall = hass.__calls.find((c) => c.domain === "climate" && c.service === "set_temperature");
+    expect(climateTempCall).toBeTruthy();
+    expect(climateTempCall.data.entity_id).toBe(CLIMATE_ENTITY_ID);
+    expect(typeof climateTempCall.data.temperature).toBe("number");
   });
 
   test("cooling uses climate fan_only mode when climate entity exists", async () => {
+    // Pressing Cooling while in Heat mode must switch climate to fan_only via climate.set_hvac_mode.
+    // It must NOT send a fan.turn_on with a heat preset or any other spurious service call.
     const hass = createMockHass({
       states: {
         [FAN_ENTITY_ID]: {
@@ -411,14 +444,18 @@ describe("dyson-remote-card integration harness", () => {
     cool.click();
     await nextTick();
 
-    const switchedClimate = hass.__calls.some(
-      (c) =>
-        c.domain === "climate" &&
-        c.service === "set_hvac_mode" &&
-        c.data.entity_id === CLIMATE_ENTITY_ID &&
-        c.data.hvac_mode === "fan_only",
+    const hvacCall = hass.__calls.find(
+      (c) => c.domain === "climate" && c.service === "set_hvac_mode",
     );
-    expect(switchedClimate).toBe(true);
+    expect(hvacCall).toBeTruthy();
+    expect(hvacCall.data.entity_id).toBe(CLIMATE_ENTITY_ID);
+    expect(hvacCall.data.hvac_mode).toBe("fan_only");
+
+    // Must NOT send temperature to fan.turn_on (HA rejects unknown fields and it's wrong anyway)
+    const invalidFanCall = hass.__calls.find(
+      (c) => c.domain === "fan" && c.service === "turn_on" && Object.hasOwn(c.data || {}, "temperature"),
+    );
+    expect(invalidFanCall).toBeUndefined();
   });
 
   test("cooling ambient sync uses climate current_temperature when fan reports invalid value", async () => {
@@ -1159,6 +1196,8 @@ describe("dyson-remote-card integration harness", () => {
   });
 
   test("night action uses switch.turn_on on discovered night mode switch (hass-dyson style)", async () => {
+    // hass-dyson implements night mode as switch.*_night_mode, not as a fan.turn_on param.
+    // See CLAUDE.md: "Night mode and sleep timer" section.
     const hass = createMockHass();
     const card = createCard(hass);
     card.shadowRoot.querySelector('button[data-action="night"]').click();
@@ -1168,10 +1207,12 @@ describe("dyson-remote-card integration harness", () => {
     expect(swCall).toBeTruthy();
     expect(swCall.data.entity_id).toBe("switch.dyson_device_night_mode");
 
-    const invalidNightPayload = hass.__calls.some(
+    // Must NOT use fan.turn_on with a night_mode field — that's incorrect for hass-dyson
+    // and would do nothing (fan service ignores unknown fields).
+    const invalidNightPayload = hass.__calls.find(
       (c) => c.domain === "fan" && c.service === "turn_on" && Object.hasOwn(c.data || {}, "night_mode"),
     );
-    expect(invalidNightPayload).toBe(false);
+    expect(invalidNightPayload).toBeUndefined();
   });
 
   test("night action uses hass_dyson.set_night_mode when no night switch and service is registered", async () => {
@@ -1204,6 +1245,8 @@ describe("dyson-remote-card integration harness", () => {
   });
 
   test("oscillation action does not send oscillating via fan.turn_on", async () => {
+    // fan.turn_on with `oscillating` is incorrect — oscillation must go via fan.oscillate or
+    // select.select_option. See CLAUDE.md: "Oscillation preset chip handler" section.
     const hass = createMockHass();
     const card = createCard(hass);
     card.shadowRoot.querySelector('[data-stepper="oscillation"]').click();
@@ -1212,10 +1255,10 @@ describe("dyson-remote-card integration harness", () => {
     osc.click();
     await nextTick();
 
-    const invalidOscPayload = hass.__calls.some(
+    const invalidOscPayload = hass.__calls.find(
       (c) => c.domain === "fan" && c.service === "turn_on" && Object.hasOwn(c.data || {}, "oscillating"),
     );
-    expect(invalidOscPayload).toBe(false);
+    expect(invalidOscPayload).toBeUndefined();
   });
 
   test("airflow direction toggles via fan.set_direction", async () => {
