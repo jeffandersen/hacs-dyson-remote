@@ -81,20 +81,21 @@ This card now includes a visual config editor, so Home Assistant should no longe
 
 ## What the controls do
 
-**Column alignment (three-column layout):** Top row is **On/Off** | **Cooling / Auto purify** | **Auto mode / Auto humidify**. The stepper row is **Oscillation** | **Heating** or **Humidity control** | **Airflow** on ordinary fans; on **humidifier combo** cards it is **Oscillation** | **Airflow** | **Humidity control** so airflow sits under Auto purify and humidity under Auto humidify. The bottom row uses an **invisible spacer** cell (column 1) plus **Night mode** and **Airflow direction** so plain grid auto-flow keeps Night in the **center column** without relying on `grid-column` (which some narrow `@container` branches were resetting). The spacer is `display: none` in the two-column narrow layout. On viewports about **346px** wide and up (the card’s own width), row **2** is fixed for the three steppers so columns cannot drift onto extra rows.
-
-| Control | Behavior |
-|--------|----------|
-| Air quality header (optional) | When enabled, can show category row, pollutant line, and/or color bar (each toggled in the editor) using linked `sensor.*` / fan attributes |
-| On/Off | Turns device on or off |
-| Cooling | Forces cooling/fan-only behavior where supported (integration-dependent) |
-| Auto mode | Toggles Auto/Manual when those presets exist |
-| Airflow `+/-` | Shows app-style speed levels (**OFF, 1..10**) and maps them to fan percentage internally |
-| Heating/Humidity `+/-` | One thermal stepper: target temperature for normal fans, or target humidity when combo mode is detected (linked **`humidifier.*`**, **`humidify`** in climate **`hvac_modes`**, or **`humidifier.*`** entity). Humidity range prefers the paired **humidifier** `min_humidity` / `max_humidity` when present; step is inferred (e.g. 10% grids on Dyson humidifiers) or overridden with optional **`humidity_step`**. Target writes use **`humidifier.set_humidity`** first by default, then climate / **`number.set_value`**; set **`humidity_write`** to `climate` or `humidifier` if your integration needs a fixed path. **−** from **AUTO** exits auto to a manual %; **−** at the minimum % turns humidify **Off** (`humidifier.set_mode` / `turn_off` or climate away from **humidify**). |
-| Oscillation `+/-` | Cycles configured angles; prefers `select.*_oscillation` when present, else `dyson.set_angle` / `fan.oscillate` |
-| Night mode | Toggles night mode when supported |
-
-Note: Dyson integrations differ. If your setup uses different services or entity types, use scripts/automations as adapters.
+| Control | What it does |
+|--------|--------------|
+| Air quality header | Shows the current air quality level (Good → Severe), dominant pollutant, and a color bar. Each piece can be turned on or off in the visual editor. Only appears if your integration provides air quality sensors. |
+| On / Off | Powers the device on or off. |
+| Cooling | Switches to fan/cooling mode — turns off heating or humidifying and just moves air. |
+| Auto mode | Lets the device manage its own speed automatically based on air quality. Press again to go back to manual. |
+| Auto purify *(humidifier models)* | Same as Auto mode, but specific to the purification side of combo devices. |
+| Auto humidify *(humidifier models)* | The device automatically adjusts humidification to reach a target humidity level. |
+| Airflow `+` / `−` | Raises or lowers fan speed. Displayed as levels **1–10** (matching the Dyson app), with **OFF** at zero and **AUTO** when the device is managing its own speed. |
+| Heating `+` / `−` | Raises or lowers the target temperature. |
+| Humidity `+` / `−` *(humidifier models)* | Raises or lowers the target humidity percentage. Shows **AUTO** when Auto humidify is on. Stepping down from **AUTO** switches back to the last manual percentage; stepping down from the minimum turns humidification off. |
+| Oscillation `+` / `−` | Cycles through sweep angles. Press the angle readout to open a picker showing all available angles for your device. |
+| Night mode | Switches to quieter, dimmer operation — the device runs at a lower speed and dims its display lights. |
+| Sleep timer | Sets the device to turn off automatically after 30, 60, 90, or 120 minutes. A countdown appears on the card while the timer is running. |
+| Airflow direction | Reverses the direction of airflow. |
 
 ## Troubleshooting
 
